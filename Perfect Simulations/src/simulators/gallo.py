@@ -103,7 +103,6 @@ class GalloSimulator:
         return eta, [X[j] for j in range(eta, n + 1)]
 
 
-
 class SubexpARTransitionModel:
     def __init__(self, alphabet, alpha=1.5):
         """

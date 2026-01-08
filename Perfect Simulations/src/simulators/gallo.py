@@ -41,7 +41,7 @@ class GalloSimulator:
 
     def lag_function(self,k):
         C_eps = ((self.eps)**(len(self.reference_string)))/len(self.reference_string)
-        return math.exp(-k**C_eps)
+        return math.exp(k**C_eps)
 
     def update_func(self, u, past):
         context = self.context_tree.find_context(past)
@@ -69,7 +69,7 @@ class GalloSimulator:
                 return None
 
     def perfect_sample(self, window):
-        m,n = window
+        m, n = window
         U = LazyU()
         X = {}
         B = set(range(m, n + 1))
@@ -80,27 +80,68 @@ class GalloSimulator:
             X[i] = self.update_func(U[i], [])
             B.discard(i)
             i += 1
+
         if not B:
-            return eta, [X[j] for j in range(m, n + 1)], X[n]
-        
+            return eta, [X[j] for j in range(m, n + 1)]
+
         while B:
             print(f"Current i: {i}, B: {B}")
             i -= 1
-            if i not in U:
-                U[i] = random.uniform(0, 1)
-            while self.eps*len(self.alphabet) <= U[i] < 1.0:
+
+            # <<< ADDED: enforce max reconstruction depth >>>
+            if abs(i) > self.max_depth:
+                i = -self.max_depth
+                B = {j for j in B if j >= i}
+                break
+            # <<< END ADDED >>>
+
+            while self.eps * len(self.alphabet) <= U[i] < 1.0:
                 i -= 1
-                U[i] = random.uniform(0, 1)
-                print(f"Decreased i to {i}, U[i]: {U[i]}")
+                B.add(i)
+                U.__setitem__(i, random.uniform(0, 1))
+
             X[i] = self.update_func(U[i], [])
-            B.add(i)
+            B.discard(i)
+
             t = min(B)
-            while t <= n and self.update_func(U[t], [X[j] for j in range(i, t)]) in self.alphabet and B:
-                X[t] = self.update_func(U[t], [X[j] for j in range(i, t)])
+            while (
+                t <= n
+                and self.update_func(
+                    U[t],
+                    [X[j] for j in sorted(B) if i <= j < t]
+                ) in self.alphabet
+                and B
+            ):
+                X[t] = self.update_func(
+                    U[t],
+                    [X[j] for j in sorted(B) if i <= j < t]
+                )
                 B.discard(t)
                 t = min(B) if B else t
+
         eta = i
+        for j in range(eta, n + 1):
+            if j not in X:
+                X[j] = self.update_func(U[j], [X[k] for k in range(eta, j)])
+
+
         return eta, [X[j] for j in range(eta, n + 1)]
+
+
+    def analytic_lookback_expectation(self):
+        """
+        Compute analytic expectation of lookback time.
+        """
+        a = 1 - self.eps * len(self.alphabet)
+        len_w = len(self.reference_string)
+        p_w = self.eps * len(self.alphabet) / len(self.reference_string)
+        assert (1 - (1 - p_w)*math.exp(self.alpha)) > 0, "Divergent lookback expectation"
+        kappa = 1 / (1 - (1 - p_w)*math.exp(self.alpha))
+
+        return a*(1/p_w + len_w + p_w*kappa)
+
+    
+    
 
 
 class SubexpARTransitionModel:

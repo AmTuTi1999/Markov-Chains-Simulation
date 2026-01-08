@@ -11,3 +11,6 @@ class LazyU:
             # generate it once
             self.storage[k] = rng.uniform(0, 1)
         return self.storage[k]
+    
+    def __setitem__(self, k, v):
+        self.storage[k] = v

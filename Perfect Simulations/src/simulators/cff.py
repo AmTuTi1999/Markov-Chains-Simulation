@@ -1,253 +1,261 @@
 import math
-from random import random
+# from src.simulators.perfect_simulator import PerfectSimulator
+import functools
 
-from src.simulators.perfect_simulator import PerfectSimulator
-import numpy as np
 from tqdm import tqdm
+from src.utils import LazyU
 
-rng = np.random.default_rng(42)
+# ============================================================
+# Binary Autoregressive Perfect Simulation (CFF 2002)
+# ============================================================
 
-class BinaryAutoregressiveSimulator(PerfectSimulator):
+class BinaryAutoregressiveSimulator:
     """
-    Implements the perfect simulation scheme from Section 3
-    for the binary autoregression model:
+    Perfect simulation for the binary autoregressive process using
+    the Comets–Fernández–Ferrari (2002) regenerative construction.
 
-        P(X_0 = 1 | past) = q(theta0 + sum_k theta_k * X_{-k})
+        P(X_0 = 1 | past) = q(theta0 + sum_k theta_k X_{-k})
 
-    using the regenerative construction of Comets–Fernández–Ferrari (2002).
+    where q(x) = (1 + exp(-2x))^{-1}.
     """
 
-    def __init__(self, theta0, theta_seq, alphabet=None, max_regen_search_depth=1000):
-        self.theta0 = theta0
-        self.theta = theta_seq     
+    def __init__(
+        self,
+        theta0,
+        theta_seq,
+        alphabet=None,
+        max_regen_search_depth=1000,
+        show_progress=True,
+    ):
+        self.theta0 = float(theta0)
+        self.theta = theta_seq
         self.G = alphabet if alphabet is not None else [-1, +1]
-        self.max_depth = max_regen_search_depth
+        self.max_depth = int(max_regen_search_depth)
+        self.show_progress = show_progress
+
+        assert set(self.G) == {-1, +1}, "Alphabet must be {-1, +1}"
 
     # --------------------------------------------------------
-    # Model: P(g | history)
+    # Logistic link and Lipschitz constant
     # --------------------------------------------------------
 
-    def q_logistic(self, x):
-        return 1.0 / (1.0 + math.exp(-2 * x))
+    @staticmethod
+    def q_logistic(x):
+        return 1.0 / (1.0 + math.exp(-2.0 * x))
+
+    @staticmethod
+    def q_prime(x):
+        qx = BinaryAutoregressiveSimulator.q_logistic(x)
+        return 2.0 * qx * (1.0 - qx)
+
+    @property
+    def C_plus(self):
+        """
+        Global Lipschitz constant of q.
+        For q(x) = (1 + exp(-2x))^{-1}, max q'(x) = 1/2.
+        """
+        return 0.5
+
+    # --------------------------------------------------------
+    # Conditional probability
+    # --------------------------------------------------------
 
     def conditional_P(self, g, history):
         """
-        P(g | w_{-1}, w_{-2}, ...)
+        P(X_0 = g | history)
         """
         x = self.theta0
         for k, wk in enumerate(history, start=1):
-            x += self.theta.get(k, 0.0) * wk
+            x += self.theta[k] * wk
+
         p = self.q_logistic(x)
-        return p if g == +1 else 1 - p
+        return p if g == +1 else (1.0 - p)
 
     # --------------------------------------------------------
-    # Compute a_k(g|w)  (Section 3 / Section 9.1)
+    # a_k(g | w)
     # --------------------------------------------------------
 
     def a_k_g_given_w(self, k, g, w_minus_1_to_minus_k):
-        extremal_tails = [+1, -1]
+        """
+        Lower bound a_k(g | w) using extremal tails.
+        """
         vals = []
 
-        for tail in extremal_tails:
+        for tail in (+1, -1):
             x = self.theta0
 
-            # include fixed w_-1...w_-k
+            # fixed part
             for i, wi in enumerate(w_minus_1_to_minus_k, start=1):
                 x += self.theta[i] * wi
 
-            # infinite exponential tail
-            tail_contrib = self.theta.tail_sum(k)
-            x += tail_contrib * tail
+            # infinite tail bound
+            x += self.theta.tail_sum(k) * tail
 
             p = self.q_logistic(x)
-            vals.append(p if g == +1 else (1 - p))
+            vals.append(p if g == +1 else (1.0 - p))
 
         return min(vals)
 
-
     # --------------------------------------------------------
-    # Compute a_k (the memory threshold)
+    # a_k (memory threshold)
     # --------------------------------------------------------
 
+    @functools.lru_cache(None)
     def a_k(self, k):
-        r_k = self.theta.tail_sum(k)  # analytic infinite tail
-        C_plus = 0.5
-        return max(0.0, 1 - 2*C_plus*r_k)
-
+        """
+        a_k = 1 - 2 * C_plus * r_k
+        """
+        r_k = self.theta.tail_sum(k)
+        return max(0.0, 1.0 - 2.0 * self.C_plus * r_k)
 
     # --------------------------------------------------------
-    # Compute K_n from U_n  (eq. 3.4)
+    # Compute K_n from U_n
     # --------------------------------------------------------
 
+    def compute_user_impatience_bias_given_limit(self):
+        """
+        Compute the user impatience bias given the limit.
+        """
+        return (1.0 - self.a_k(self.max_depth)) / self.a_k(self.max_depth)
+
+    def conditional_lookback_expectation(self):
+        """
+        Compute E[K | K < max_depth].
+        """
+        expect_sum = 0.0
+
+        for k in range(self.max_depth):
+            ak = self.a_k(k)
+            ak_next = self.a_k(k + 1)
+            pk = ak_next - ak
+            expect_sum += k * pk
+
+        return expect_sum * self.a_k(self.max_depth) + 2 * (1 - self.a_k(self.max_depth)) * self.theta.tail_sum(self.max_depth)
+    
     def compute_K(self, u):
-        k = 0
-        while True:
+        """
+        Smallest k such that u < a_k(k).
+        """
+        for k in range(self.max_depth + 1):
             if u < self.a_k(k):
                 return k
-            k += 1
+        return self.max_depth
+    
+
+    def analytic_lookback_bound(self,) -> float:
+        """
+        Analytic upper bound on expected lookback depth:
+
+           
+
+        where rho is the upper bound on the memory decay.
+        """
+        return self.theta.analytic_lookback_bound()
 
     # --------------------------------------------------------
-    # τ[n] definition (eq. 3.5)
+    # τ[n] definition
     # --------------------------------------------------------
 
     def tau_of_n(self, U, window):
+        """
+        Compute regeneration time τ[n].
+        """
         s, t = window
-        # Start from m = s and move downward
-        for m in range(s, -10**18, -1):  # or while-loop; this just goes down indefinitely
-            valid = True
+        lower_bound = s - self.max_depth
 
-            # Check all k in [m, t]
+        for m in range(s, lower_bound - 1, -1):
+            valid = True
             for k in range(m, t + 1):
                 if U[k] >= self.a_k(k - m):
                     valid = False
                     break
-
             if valid:
                 return m
-            else:
-                return s - self.max_depth
-                   
-                    
-                        
 
-    def compute_user_impatience_bias(self, n, tau):
-        """
-        Compute the user impatience bias at time n.
-        This is the probability that τ[n] is not a true regeneration time.
-        """
-        if tau <= n + self.max_depth:
-            return 0.0
-        else:
-            return (self.a_k(self.max_depth))
+        return lower_bound
+
     # --------------------------------------------------------
-    # Construct X_τ ... X_n  (eq. 3.7)
+    # Construct X_tau ... X_n
     # --------------------------------------------------------
 
     def sample_interval(self, U, tau, window, debug=False):
         """
-        Construct X_tau, ..., X_n with optional debugging output.
-        Fully supports negative tau.
+        Construct X_tau, ..., X_n.
         """
         X = {}
         n = window[1]
         tau = int(tau)
-        if debug:
-            print("\n=== BEGIN INTERVAL SAMPLING ===")
-            print(f"tau = {tau}, n = {window}")
-            print("--------------------------------------------------------")
 
-        for j in range(tau, n + 1):
+        iterator = range(tau, n + 1)
+        if self.show_progress:
+            iterator = tqdm(iterator, desc="Forward sampling")
 
-            # =====================================================================
-            # 1. Build past (X[j-1], X[j-2], ...), stopping at tau
-            # =====================================================================
+        for j in iterator:
+
+            # Build past
             past = []
             k = 1
             while True:
                 idx = j - k
-                if idx < tau:
-                    break
-                if idx not in X:
+                if idx < tau or idx not in X:
                     break
                 past.append(X[idx])
                 k += 1
             past = tuple(past)
 
-            if debug:
-                print(f"\n[j = {j}] Past = {past}")
-
-            # =====================================================================
-            # 2. Compute memory depth K_j
-            # =====================================================================
+            # Memory depth
             Kj = self.compute_K(U[j])
 
-            if debug:
-                print(f"  U[{j}] = {U[j]:.6f}")
-                print(f"  K_j = {Kj}")
-
-            # =====================================================================
-            # 3. Build probability partition on [0,1]
-            # =====================================================================
+            # Probability partition
             intervals = []
             left = 0.0
 
             for k in range(Kj + 1):
                 w = past[:k]
-                if debug:
-                    print(f"    k={k}, w={w}")
-
                 for g in self.G:
                     akg = self.a_k_g_given_w(k, g, w)
+                    akg = min(akg, 1.0 - left)  # numerical safety
                     intervals.append((left, left + akg, g))
-                    if debug:
-                        print(f"      interval: [{left:.6f}, {left+akg:.6f}) for g={g}")
                     left += akg
 
-            # =====================================================================
-            # 4. Choose X[j] according to partition
-            # =====================================================================
+            # Sample
             uj = U[j]
-            assigned = False
             for L, R, g in intervals:
                 if L <= uj < R:
                     X[j] = g
-                    assigned = True
-                    if debug:
-                        print(f"  Selected g={g} because {L:.6f} <= {uj:.6f} < {R:.6f}")
                     break
-
-            # Fallback for rare numerical issues
-            if not assigned:
+            else:
+                # fallback
                 X[j] = self.G[-1]
-                if debug:
-                    print(f"  WARNING: uj not in any interval; fallback to g={X[j]}")
 
-        if debug:
-            print("\n=== END INTERVAL SAMPLING ===\n")
-
-        biases = []
-        for key in X.keys():
-            if key > 0:
-                biases.append(self.compute_user_impatience_bias(key, tau))
-        if debug:
-            print(f"User impatience biases for sampled interval: {biases}")
-
-        return X, np.array(biases).mean() if biases else 0.0
-
+        return X
 
     # --------------------------------------------------------
-    # Perfect Simulation of X_n (Section 3)
+    # Perfect simulation
     # --------------------------------------------------------
 
-    def perfect_sample(self, window=(3,5)):
+    def perfect_sample(self, window=(0, 0)):
+        """
+        Perfectly sample X_window[0] ... X_window[1].
+        """
         U = LazyU()
-        j = window[1]
-     
-        # Step 1: Generate backward until τ[n] finite
-        while True:
-            tau_n = self.tau_of_n(U, window=window)
-            print(f"At window={window}, τ[{window}]={tau_n}")
-            if tau_n != float("-inf"):
-                break
-            j -= 1
+        s, t = window
 
-        # Step 2: Construct X_τ,...,X_n
-        X, biases = self.sample_interval(U, tau_n, window)
-        window_index = list(range(window[0], window[1]+1))
-        perfect_samples = []
-        for i in window_index:
-            perfect_samples.append(X[i])
-        return perfect_samples, tau_n
+        iterator = range(t, s - self.max_depth - 1, -1)
+        if self.show_progress:
+            iterator = tqdm(iterator, desc="Backward search")
+
+        tau_n = None
+        for _ in iterator:
+            tau_n = self.tau_of_n(U, window)
+            if tau_n > s - self.max_depth:
+                break
+
+        X = self.sample_interval(U, tau_n, window)
+        samples = [X[i] for i in range(s, t + 1)]
+        return samples, tau_n
+
     
 
 
 
-class LazyU:
-    def __init__(self):
-        self.storage = {}   # only store accessed values
-
-    def __getitem__(self, k):
-        if k not in self.storage:
-            # generate it once
-            self.storage[k] = rng.uniform(0, 1)
-        return self.storage[k]

@@ -19,14 +19,14 @@ class GalloSimulator:
     def __init__(
         self,
         alpha,
-        epsilon,
         alphabet,
         reference_string,
         max_depth=8,
     ):
         self.alpha = alpha
-        self.eps = epsilon
         self.alphabet = alphabet
+        self.eps = 0.5*np.sqrt((1 - 1/np.exp(0.5)))
+        print(f"Computed uniform lower bound on transition probabilities: {self.eps:.6f}")
         self.reference_string = tuple(reference_string)
         self.max_depth = int(max_depth)
         self.transition_func = SubexpARTransitionModel(alphabet=self.alphabet, alpha=self.alpha).transition_prob
@@ -42,6 +42,10 @@ class GalloSimulator:
     def lag_function(self,k):
         C_eps = ((self.eps)**(len(self.reference_string)))/len(self.reference_string)
         return math.exp(k**C_eps)
+    
+    def inverse_lag_function(self, S):
+        C_eps = ((self.eps)**(len(self.reference_string)))/len(self.reference_string)
+        return (math.log(S))**(1/C_eps)
 
     def update_func(self, u, past):
         context = self.context_tree.find_context(past)
@@ -134,11 +138,47 @@ class GalloSimulator:
         """
         a = 1 - self.eps * len(self.alphabet)
         len_w = len(self.reference_string)
-        p_w = self.eps * len(self.alphabet) / len(self.reference_string)
+        p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
+        print(1 - (1 - p_w)*math.exp(self.alpha))
         assert (1 - (1 - p_w)*math.exp(self.alpha)) > 0, "Divergent lookback expectation"
         kappa = 1 / (1 - (1 - p_w)*math.exp(self.alpha))
 
         return a*(1/p_w + len_w + p_w*kappa)
+    
+
+
+    def empirical_lookback_expectation(self):
+        """
+        Compute an upper bound on E[L_n] as given in the formula.
+
+
+
+        Returns
+        -------
+        float
+            Upper bound on E[L_n].
+        """
+        len_w = len(self.reference_string)
+        p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
+
+        P_leq_S = 1 - (1 - p_w)**self.max_depth
+        P_gt_S = (1 - p_w)**self.max_depth
+
+        # First term: L_n <= S
+        term1 = (1 / (p_w - p_w * (1 - p_w)**self.max_depth)) + len_w + min(self.max_depth, p_w/(1 - (1-p_w)*math.exp(self.alpha)))
+
+        # Second term: L_n > S
+        l_inv = self.inverse_lag_function(self.max_depth)
+        term2_min = min(
+            -self.max_depth * (1 - p_w)**l_inv / np.log(1 - p_w),
+            -(np.exp(self.alpha) * (1 - p_w))**l_inv / (self.alpha + np.log(1 - p_w))
+        )
+        term2 = len_w / (p_w * (1 - p_w)**self.max_depth) + term2_min
+
+        # Expected value bound
+        E_Ln_bound = P_leq_S * term1 + P_gt_S * term2
+
+        return E_Ln_bound
 
     
     
@@ -155,7 +195,7 @@ class SubexpARTransitionModel:
 
     # ---- subexponential (polynomial) decay ----
     def decay_fn(self, i):
-        return 1.0 / ((i + 1) ** self.alpha)
+        return np.exp(- (i + 1)**self.alpha)
 
     # ---- simple compatibility / feature function ----
     def feature(self, past_symbol, symbol):
@@ -177,7 +217,7 @@ class SubexpARTransitionModel:
         scores -= scores.max()  # numerical stability
         probs = np.exp(scores)
         probs /= probs.sum()
-        return probs[self.alphabet.index(symbol)]
+        return max(probs[self.alphabet.index(symbol)], 0.5*np.sqrt((1 - 1/np.exp(0.5))))
 
     # ---- full distribution (optional) ----
     def transition_distribution(self, context):

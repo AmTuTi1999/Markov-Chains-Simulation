@@ -11,9 +11,7 @@ if __name__ == "__main__":
 
 
     # ---- max context depth ----
-    max_depth = 12
-
-
+    max_depth = 20
 
 
     # ---- decay parameter sweep ----
@@ -23,7 +21,6 @@ if __name__ == "__main__":
         window=window,
         args={
             "alphas": alphas,
-            "epsilon": 0.4,
             "alphabet": alphabet,
             "reference_string": reference_string,
         },

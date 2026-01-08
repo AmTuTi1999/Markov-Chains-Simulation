@@ -12,12 +12,11 @@ def run_gallo_simulation(
 ):
     start_time = time.time()
     alphas = args.get("alphas")
-    lookback, time_list = [], []
+    lookback, time_list, emp_lookback = [], [], []
     for alpha in alphas:
-        
+        print(f"Running Gallo simulation for alpha={alpha}...")
         sim = GalloSimulator(
             alpha=alpha,
-            epsilon=args['epsilon'],
             alphabet=args['alphabet'],
             reference_string=args['reference_string'],
             max_depth=max_depth,
@@ -26,6 +25,7 @@ def run_gallo_simulation(
             window=window,
         )
         lookback.append(sim.analytic_lookback_expectation())
+        emp_lookback.append(sim.empirical_lookback_expectation())
         time_list.append((alpha, regen_time))
         elapsed_time = time.time() - start_time
         print(
@@ -41,11 +41,13 @@ def run_gallo_simulation(
     fig = plot_and_save_figure(
         x={ 0: [(alpha, lookback[i]) for i, alpha in enumerate(alphas)] },
         y={ 0: [(alpha, lookback[i]) for i, alpha in enumerate(alphas)] },
-        z=None,
+        z={ 0: [(alpha, emp_lookback[i]) for i, alpha in enumerate(alphas)] },
         title="Gallo Lookback Expectation vs Alpha",
         xlabel="Alpha",
         ylabel="Lookback Expectation",
         filename=filename,
+        label_1="Empirical Bound",
+        label_2="Analytic Bound",
     )
 
     fig.savefig(filename)

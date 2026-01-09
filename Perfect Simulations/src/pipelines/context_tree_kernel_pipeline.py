@@ -12,7 +12,7 @@ def run_gallo_simulation(
 ):
     start_time = time.time()
     alphas = args.get("alphas")
-    lookback, time_list, emp_lookback = [], [], []
+    lookback, time_list, emp_lookback, bias = [], [], [], []
     for alpha in alphas:
         print(f"Running Gallo simulation for alpha={alpha}...")
         sim = GalloSimulator(
@@ -26,6 +26,7 @@ def run_gallo_simulation(
         )
         lookback.append(sim.analytic_lookback_expectation())
         emp_lookback.append(sim.empirical_lookback_expectation())
+        bias.append(sim.user_impatience_bias())
         time_list.append((alpha, regen_time))
         elapsed_time = time.time() - start_time
         print(
@@ -52,3 +53,24 @@ def run_gallo_simulation(
 
     fig.savefig(filename)
     print(f"Figure saved to {filename}")
+
+
+    filename_bias = os.path.join("results", "gallo", "Bias_vs_alpha.png")
+        # If an absolute path was provided, make it relative to current working directory
+    if os.path.isabs(filename_bias):
+        filename_bias = os.path.join(os.getcwd(), filename_bias.lstrip(os.sep))
+    parent_dir_bias = os.path.dirname(filename_bias)
+    if parent_dir_bias:
+        os.makedirs(parent_dir_bias, exist_ok=True)
+    fig_bias = plot_and_save_figure(
+        x={ 0: [(alpha, bias[i]) for i, alpha in enumerate(alphas)] },
+        y={ 0: [(alpha, bias[i]) for i, alpha in enumerate(alphas)] },
+        z=None,
+        title="User Impatience Bias vs Alpha",
+        xlabel="Alpha",
+        ylabel="User Impatience Bias",
+        filename=filename_bias,
+        label_1="User Impatience Bias",
+    )   
+    fig_bias.savefig(filename_bias)
+    print(f"Figure saved to {filename_bias}")

@@ -139,13 +139,25 @@ class GalloSimulator:
         a = 1 - self.eps * len(self.alphabet)
         len_w = len(self.reference_string)
         p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
-        print(1 - (1 - p_w)*math.exp(self.alpha))
+
         assert (1 - (1 - p_w)*math.exp(self.alpha)) > 0, "Divergent lookback expectation"
         kappa = 1 / (1 - (1 - p_w)*math.exp(self.alpha))
 
         return a*(1/p_w + len_w + p_w*kappa)
     
+    def user_impatience_bias(self):
+        """
+        Compute user impatience bias as given in the formula.
 
+        Returns
+        -------
+        float
+            User impatience bias.
+        """
+        E_l_n = self.analytic_lookback_expectation()
+        bias = 0 if (E_l_n/self.max_depth)/ (1 - (E_l_n/self.max_depth)) > 1 else (E_l_n/self.max_depth)/ (1 - (E_l_n/self.max_depth))
+
+        return bias
 
     def empirical_lookback_expectation(self):
         """

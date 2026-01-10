@@ -26,12 +26,14 @@ def run_gallo_simulation(
         )
         lookback.append(sim.analytic_lookback_expectation())
         emp_lookback.append(sim.empirical_lookback_expectation())
+
         bias.append(sim.user_impatience_bias())
         time_list.append((alpha, regen_time))
         elapsed_time = time.time() - start_time
         print(
             f"Alpha: {alpha}, Lookback Expectation: {lookback[-1]:.2f}, Regeneration Time: {regen_time:.2f}s, Total Time: {elapsed_time:.2f}s"
         )
+ 
     filename = os.path.join("results", "gallo", "Gallo_Lookback_vs_alpha.png")
         # If an absolute path was provided, make it relative to current working directory
     if os.path.isabs(filename):
@@ -47,8 +49,8 @@ def run_gallo_simulation(
         xlabel="Alpha",
         ylabel="Lookback Expectation",
         filename=filename,
-        label_1="Empirical Bound",
-        label_2="Analytic Bound",
+        label_1="Analytic Bound",
+        label_2="Empirical Bound",
     )
 
     fig.savefig(filename)

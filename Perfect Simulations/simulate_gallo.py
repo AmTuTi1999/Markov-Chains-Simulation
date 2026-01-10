@@ -5,7 +5,7 @@ from src.pipelines.context_tree_kernel_pipeline import run_gallo_simulation
 if __name__ == "__main__":
 
     # ---- basic setup ----
-    window = (0, 5)
+    window = (0, 10)
     alphabet = [+1, -1]
     reference_string = [+1, +1]
 
@@ -15,7 +15,7 @@ if __name__ == "__main__":
 
 
     # ---- decay parameter sweep ----
-    alphas = [0.05 * i for i in range(1, 10)]
+    alphas = [0.0052 * i for i in range(1, 10)]
 
     run_gallo_simulation(
         window=window,

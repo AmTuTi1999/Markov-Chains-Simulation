@@ -26,6 +26,9 @@ class GalloSimulator:
         self.alpha = alpha
         self.alphabet = alphabet
         self.eps = 0.5*np.sqrt((1 - 1/np.exp(0.5)))
+        self.C_eps = (-1/len(reference_string)) * np.log(1 - self.eps ** len(reference_string))
+        print(f"C_eps: {self.C_eps:.6f}")
+        assert self.alpha < self.C_eps, "Alpha must be less than C_eps to ensure convergence."
         print(f"Computed uniform lower bound on transition probabilities: {self.eps:.6f}")
         self.reference_string = tuple(reference_string)
         self.max_depth = int(max_depth)
@@ -40,13 +43,10 @@ class GalloSimulator:
 
 
     def lag_function(self,k):
-        C_eps = ((self.eps)**(len(self.reference_string)))/len(self.reference_string)
-        return math.exp(k**C_eps)
+        return np.exp(k**self.alpha)
     
     def inverse_lag_function(self, S):
-        C_eps = ((self.eps)**(len(self.reference_string)))/len(self.reference_string)
-        return (math.log(S))**(1/C_eps)
-
+        return (np.log(S))**(1/self.alpha)
     def update_func(self, u, past):
         context = self.context_tree.find_context(past)
 
@@ -54,8 +54,8 @@ class GalloSimulator:
         # Use context-dependent transitions if context found
         if context is not None and (context in self.context_tree.contexts):
             for symbol in self.alphabet:
-                prob = self.transition_func(symbol, context)
-                if upper_left <= u < upper_left + prob:
+                prob = self.transition_func(symbol, context) - self.eps
+                if self.eps + upper_left <= u < upper_left + prob:
                     return symbol
                 upper_left += prob
             return self.alphabet[-1]  # fallback
@@ -154,10 +154,48 @@ class GalloSimulator:
         float
             User impatience bias.
         """
-        E_l_n = self.analytic_lookback_expectation()
-        bias = 0 if (E_l_n/self.max_depth)/ (1 - (E_l_n/self.max_depth)) > 1 else (E_l_n/self.max_depth)/ (1 - (E_l_n/self.max_depth))
+        len_w = len(self.reference_string)
+        p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
+        P_gt_S = (1/p_w + p_w/(1 - (1 - p_w)*math.exp(self.alpha)))/ (self.max_depth - len_w)
+        P_gt_S = P_gt_S if P_gt_S < 1 else 1
+
+        bias = (P_gt_S) / (1 - P_gt_S)
 
         return bias
+
+    # def empirical_lookback_expectation(self):
+    #     """
+    #     Compute an upper bound on E[L_n] as given in the formula.
+
+
+
+    #     Returns
+    #     -------
+    #     float
+    #         Upper bound on E[L_n].
+    #     """
+    #     len_w = len(self.reference_string)
+    #     p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
+
+    #     P_leq_S = 1 - (1 - p_w)**self.max_depth
+    #     P_gt_S = (1 - p_w)**self.max_depth
+
+    #     # First term: L_n <= S
+    #     term1 = (1 / (p_w - p_w * (1 - p_w)**self.max_depth)) + len_w + min(self.max_depth, p_w/(1 - (1-p_w)*math.exp(self.alpha)))
+
+    #     # Second term: L_n > S
+    #     l_inv = self.inverse_lag_function(self.max_depth)
+    #     term2_min = min(
+    #         -self.max_depth * (1 - p_w)**l_inv / np.log(1 - p_w),
+    #         -(np.exp(self.alpha) * (1 - p_w))**l_inv / (self.alpha + np.log(1 - p_w))
+    #     )
+    #     term2 = len_w / (p_w * (1 - p_w)**self.max_depth) + term2_min
+
+    #     # Expected value bound
+    #     E_Ln_bound = P_leq_S * term1 + P_gt_S * term2
+
+    #     return E_Ln_bound
+
 
     def empirical_lookback_expectation(self):
         """
@@ -173,19 +211,18 @@ class GalloSimulator:
         len_w = len(self.reference_string)
         p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
 
-        P_leq_S = 1 - (1 - p_w)**self.max_depth
-        P_gt_S = (1 - p_w)**self.max_depth
+        P_leq_S = 1
+        P_gt_S = (1/p_w + p_w/(1 - (1 - p_w)*math.exp(self.alpha)))/ (self.max_depth - len_w)
+        P_gt_S = P_gt_S if P_gt_S < 1 else 1
 
         # First term: L_n <= S
-        term1 = (1 / (p_w - p_w * (1 - p_w)**self.max_depth)) + len_w + min(self.max_depth, p_w/(1 - (1-p_w)*math.exp(self.alpha)))
-
+        print(f"P_leq_S: {P_leq_S:.6f}, P_gt_S: {P_gt_S:.6f}")
+        term1 = 1
         # Second term: L_n > S
-        l_inv = self.inverse_lag_function(self.max_depth)
-        term2_min = min(
-            -self.max_depth * (1 - p_w)**l_inv / np.log(1 - p_w),
-            -(np.exp(self.alpha) * (1 - p_w))**l_inv / (self.alpha + np.log(1 - p_w))
-        )
-        term2 = len_w / (p_w * (1 - p_w)**self.max_depth) + term2_min
+
+        m_n_s = self.max_depth - len_w
+        term2_min = conditional_lag_upper_bound(p_w, self.max_depth - len_w, self.lag_function, m_n_s)
+        term2 = len_w + (1 / (p_w * P_gt_S)) + term2_min
 
         # Expected value bound
         E_Ln_bound = P_leq_S * term1 + P_gt_S * term2
@@ -193,6 +230,39 @@ class GalloSimulator:
         return E_Ln_bound
 
     
+
+
+def conditional_lag_upper_bound(p_w, S, lag_fn, max_k=10_000):
+    """
+    Upper bound on E[ell^w(m_n) | m_n + ell^w(m_n) > S].
+    """
+    KS = compute_KS(S, lag_fn, max_k)
+    base_term = lag_fn(KS + 1)
+    increment_term = sup_lag_increment(lag_fn, KS + 1, max_k) / p_w
+    return base_term + increment_term
+
+
+def sup_lag_increment(lag_fn, start_k, max_k=10_000):
+    """
+    Compute sup_{k >= start_k} (ell^w(k+1) - ell^w(k))
+    over a finite window.
+    """
+    return max(
+        lag_fn(k + 1) - lag_fn(k)
+        for k in range(start_k, max_k)
+    )
+
+
+def compute_KS(S, lag_fn, max_k=10_000):
+    """
+    Compute K_S = max{k : k + ell^w(k) <= S}.
+    """
+    for k in range(1, max_k):
+        if k + lag_fn(k) > S:
+            return k - 1
+    return max_k
+
+
     
 
 

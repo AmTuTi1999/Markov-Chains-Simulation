@@ -11,7 +11,7 @@ if __name__ == "__main__":
 
 
     # ---- max context depth ----
-    max_depth = 20
+    max_depth = 50
 
 
     # ---- decay parameter sweep ----

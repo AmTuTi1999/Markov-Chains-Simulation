@@ -21,17 +21,17 @@ def run_gallo_simulation(
             reference_string=args['reference_string'],
             max_depth=max_depth,
         )
-        regen_time, perfect_samples = sim.perfect_sample(
-            window=window,
-        )
+        # regen_time, perfect_samples = sim.perfect_sample(
+        #     window=window,
+        # )
         lookback.append(sim.analytic_lookback_expectation())
         emp_lookback.append(sim.empirical_lookback_expectation())
 
         bias.append(sim.user_impatience_bias())
-        time_list.append((alpha, regen_time))
+        time_list.append((alpha, 0))
         elapsed_time = time.time() - start_time
         print(
-            f"Alpha: {alpha}, Lookback Expectation: {lookback[-1]:.2f}, Regeneration Time: {regen_time:.2f}s, Total Time: {elapsed_time:.2f}s"
+            f"Alpha: {alpha}, Lookback Expectation: {lookback[-1]:.2f}, Regeneration Time: {0:.2f}s, Total Time: {elapsed_time:.2f}s"
         )
  
     filename = os.path.join("results", "gallo", "Gallo_Lookback_vs_alpha.png")

@@ -32,14 +32,14 @@ class GalloSimulator:
         print(f"Computed uniform lower bound on transition probabilities: {self.eps:.6f}")
         self.reference_string = tuple(reference_string)
         self.max_depth = int(max_depth)
-        self.transition_func = SubexpARTransitionModel(alphabet=self.alphabet, alpha=self.alpha).transition_prob
+        # self.transition_func = SubexpARTransitionModel(alphabet=self.alphabet, alpha=self.alpha).transition_prob
 
-        self.context_tree = ReferenceContextTree(
-            alphabet=self.alphabet,
-            reference_string=self.reference_string,
-            lag_function=self.lag_function,
-            max_depth=self.max_depth,
-        )
+        # self.context_tree = ReferenceContextTree(
+        #     alphabet=self.alphabet,
+        #     reference_string=self.reference_string,
+        #     lag_function=self.lag_function,
+        #     max_depth=self.max_depth,
+        # )
 
 
     def lag_function(self,k):
@@ -208,49 +208,40 @@ class GalloSimulator:
         float
             Upper bound on E[L_n].
         """
-        len_w = len(self.reference_string)
-        p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
-
-        P_leq_S = 1
-        P_gt_S = (1/p_w + p_w/(1 - (1 - p_w)*math.exp(self.alpha)))/ (self.max_depth - len_w)
-        P_gt_S = P_gt_S if P_gt_S < 1 else 1
-
-        # First term: L_n <= S
-        print(f"P_leq_S: {P_leq_S:.6f}, P_gt_S: {P_gt_S:.6f}")
+      
         term1 = 1
-        # Second term: L_n > S
 
-        m_n_s = self.max_depth - len_w
-        term2_min = conditional_lag_upper_bound(p_w, self.max_depth - len_w, self.lag_function, m_n_s)
-        term2 = len_w + (1 / (p_w * P_gt_S)) + term2_min
+        term2 = self.tail_residual_closed_form()
+        print(f"Tail residual closed form: {term2:.6f}")
 
         # Expected value bound
-        E_Ln_bound = P_leq_S * term1 + P_gt_S * term2
+        E_Ln_bound = term1 + term2
+        print(f"E_Ln_bound: {E_Ln_bound:.6f}")
 
-        return E_Ln_bound
+        return (1 - self.eps*len(self.alphabet)) * E_Ln_bound
 
     
+    def tail_residual_closed_form(self) -> float:
+        """
+        Compute E[(L - S)_+] for L = w_abs + m + exp(alpha*m),
+        where m ~ Geom(p_w) on {1,2,...}.
+        
+        Returns np.inf if (1-p_w)*exp(alpha) >= 1.
+        """
+        S = self.max_depth
+        p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
+        if not (0 < p_w <= 1):
+            raise ValueError("p_w must be in (0,1].")
+        r = 1.0 - p_w
+        if r * np.exp(self.alpha) >= 1.0:
+            return np.inf
 
+        kS = compute_KS(S, self.lag_function, max_k=10_000)
+        tail_prob = r ** (kS - 1)
 
-def conditional_lag_upper_bound(p_w, S, lag_fn, max_k=10_000):
-    """
-    Upper bound on E[ell^w(m_n) | m_n + ell^w(m_n) > S].
-    """
-    KS = compute_KS(S, lag_fn, max_k)
-    base_term = lag_fn(KS + 1)
-    increment_term = sup_lag_increment(lag_fn, KS + 1, max_k) / p_w
-    return base_term + increment_term
-
-
-def sup_lag_increment(lag_fn, start_k, max_k=10_000):
-    """
-    Compute sup_{k >= start_k} (ell^w(k+1) - ell^w(k))
-    over a finite window.
-    """
-    return max(
-        lag_fn(k + 1) - lag_fn(k)
-        for k in range(start_k, max_k)
-    )
+        term_linear = tail_prob * (len(self.reference_string) - S + (kS - 1) + 1.0 / p_w)
+        term_exp = (p_w * tail_prob * np.exp(self.alpha * kS)) / (1.0 - r * np.exp(self.alpha))
+        return term_linear + term_exp
 
 
 def compute_KS(S, lag_fn, max_k=10_000):

@@ -1,304 +1,571 @@
-#import itertools
+import numpy as np
 import random
 import math
-import numpy as np
+from typing import List, Tuple, Set, Dict
+from itertools import product
 
-from src.utils import LazyU
-from src.utils.context_tree import ReferenceContextTree
-
-class GalloSimulator:
+class GalloContextTreeSimulator:
     """
-    Perfect simulation for chains of infinite order using
-    the Gallo (2009) regenerative construction with context trees.
-
-        P(X_0 = x | past) = F(x | context(past))
-
-    where context(past) is determined by a reference string and lag function.
+    Perfect simulation for chains with unbounded variable-length memory.
+    Implements Gallo (2009) construction with context trees.
+    
+    Matches the experimental framework used in CFF experiments.
     """
-
+    
     def __init__(
         self,
-        alpha,
-        alphabet,
-        reference_string,
-        max_depth=8,
+        alpha: float,
+        alphabet: List[int],
+        reference_string: List[int],
+        epsilon: float = 0.3,
+        beta: float = 0.7,
+        max_depth: int = 50,
+        max_trie_depth: int = 8,
+        show_progress: bool = False
     ):
+        """
+        Initialize Gallo simulator.
+        
+        Args:
+            alpha: Growth parameter for lag function l_w(k) = exp(α·k)
+            alphabet: State space (e.g., [-1, +1])
+            reference_string: Reference string w (e.g., [-1, +1])
+            epsilon: Minimum transition probability (non-nullness bound)
+            beta: AR coefficient decay exponent: a_i = exp(-i^β)
+            max_depth: Maximum context tree depth for generation (this is S)
+            max_trie_depth: Maximum depth for context tree construction
+            show_progress: Whether to show progress bars
+        """
         self.alpha = alpha
         self.alphabet = alphabet
-        self.eps = 0.5*np.sqrt((1 - 1/np.exp(0.5)))
-        self.C_eps = (-1/len(reference_string)) * np.log(1 - self.eps ** len(reference_string))
-        print(f"C_eps: {self.C_eps:.6f}")
-        assert self.alpha < self.C_eps, "Alpha must be less than C_eps to ensure convergence."
-        print(f"Computed uniform lower bound on transition probabilities: {self.eps:.6f}")
         self.reference_string = tuple(reference_string)
-        self.max_depth = int(max_depth)
-        # self.transition_func = SubexpARTransitionModel(alphabet=self.alphabet, alpha=self.alpha).transition_prob
-
-        # self.context_tree = ReferenceContextTree(
-        #     alphabet=self.alphabet,
-        #     reference_string=self.reference_string,
-        #     lag_function=self.lag_function,
-        #     max_depth=self.max_depth,
-        # )
-
-
-    def lag_function(self,k):
-        return np.exp(k**self.alpha)
-    
-    def inverse_lag_function(self, S):
-        return (np.log(S))**(1/self.alpha)
-    def update_func(self, u, past):
-        context = self.context_tree.find_context(past)
-
-        upper_left = self.eps * len(self.alphabet)
-        # Use context-dependent transitions if context found
-        if context is not None and (context in self.context_tree.contexts):
-            for symbol in self.alphabet:
-                prob = self.transition_func(symbol, context) - self.eps
-                if self.eps + upper_left <= u < upper_left + prob:
-                    return symbol
-                upper_left += prob
-            return self.alphabet[-1]  # fallback
-       
-        if context is None:
-   
-            for i, symbol in enumerate(self.alphabet):
-                if i*self.eps <= u < (i + 1)*self.eps:
-                    next_alphabet = symbol
-                    return next_alphabet
-                else:
-                    next_alphabet = None
-            
-            if next_alphabet is None:
-                return None
-
-    def perfect_sample(self, window):
-        m, n = window
-        U = LazyU()
-        X = {}
-        B = set(range(m, n + 1))
-        i = m
-        eta = m
-
-        while i <= n and self.update_func(U[i], []) in self.alphabet and B:
-            X[i] = self.update_func(U[i], [])
-            B.discard(i)
-            i += 1
-
-        if not B:
-            return eta, [X[j] for j in range(m, n + 1)]
-
-        while B:
-            print(f"Current i: {i}, B: {B}")
-            i -= 1
-
-            # <<< ADDED: enforce max reconstruction depth >>>
-            if abs(i) > self.max_depth:
-                i = -self.max_depth
-                B = {j for j in B if j >= i}
-                break
-            # <<< END ADDED >>>
-
-            while self.eps * len(self.alphabet) <= U[i] < 1.0:
-                i -= 1
-                B.add(i)
-                U.__setitem__(i, random.uniform(0, 1))
-
-            X[i] = self.update_func(U[i], [])
-            B.discard(i)
-
-            t = min(B)
-            while (
-                t <= n
-                and self.update_func(
-                    U[t],
-                    [X[j] for j in sorted(B) if i <= j < t]
-                ) in self.alphabet
-                and B
-            ):
-                X[t] = self.update_func(
-                    U[t],
-                    [X[j] for j in sorted(B) if i <= j < t]
-                )
-                B.discard(t)
-                t = min(B) if B else t
-
-        eta = i
-        for j in range(eta, n + 1):
-            if j not in X:
-                X[j] = self.update_func(U[j], [X[k] for k in range(eta, j)])
-
-
-        return eta, [X[j] for j in range(eta, n + 1)]
-
-
-    def analytic_lookback_expectation(self):
-        """
-        Compute analytic expectation of lookback time.
-        """
-        a = 1 - self.eps * len(self.alphabet)
-        len_w = len(self.reference_string)
-        p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
-
-        assert (1 - (1 - p_w)*math.exp(self.alpha)) > 0, "Divergent lookback expectation"
-        kappa = 1 / (1 - (1 - p_w)*math.exp(self.alpha))
-
-        return a*(1/p_w + len_w + p_w*kappa)
-    
-    def user_impatience_bias(self):
-        """
-        Compute user impatience bias as given in the formula.
-
-        Returns
-        -------
-        float
-            User impatience bias.
-        """
-        len_w = len(self.reference_string)
-        p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
-        P_gt_S = (1/p_w + p_w/(1 - (1 - p_w)*math.exp(self.alpha)))/ (self.max_depth - len_w)
-        P_gt_S = P_gt_S if P_gt_S < 1 else 1
-
-        bias = (P_gt_S) / (1 - P_gt_S)
-
-        return bias
-
-    # def empirical_lookback_expectation(self):
-    #     """
-    #     Compute an upper bound on E[L_n] as given in the formula.
-
-
-
-    #     Returns
-    #     -------
-    #     float
-    #         Upper bound on E[L_n].
-    #     """
-    #     len_w = len(self.reference_string)
-    #     p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
-
-    #     P_leq_S = 1 - (1 - p_w)**self.max_depth
-    #     P_gt_S = (1 - p_w)**self.max_depth
-
-    #     # First term: L_n <= S
-    #     term1 = (1 / (p_w - p_w * (1 - p_w)**self.max_depth)) + len_w + min(self.max_depth, p_w/(1 - (1-p_w)*math.exp(self.alpha)))
-
-    #     # Second term: L_n > S
-    #     l_inv = self.inverse_lag_function(self.max_depth)
-    #     term2_min = min(
-    #         -self.max_depth * (1 - p_w)**l_inv / np.log(1 - p_w),
-    #         -(np.exp(self.alpha) * (1 - p_w))**l_inv / (self.alpha + np.log(1 - p_w))
-    #     )
-    #     term2 = len_w / (p_w * (1 - p_w)**self.max_depth) + term2_min
-
-    #     # Expected value bound
-    #     E_Ln_bound = P_leq_S * term1 + P_gt_S * term2
-
-    #     return E_Ln_bound
-
-
-    def empirical_lookback_expectation(self):
-        """
-        Compute an upper bound on E[L_n] as given in the formula.
-
-
-
-        Returns
-        -------
-        float
-            Upper bound on E[L_n].
-        """
-      
-        term1 = 1
-
-        term2 = self.tail_residual_closed_form()
-        print(f"Tail residual closed form: {term2:.6f}")
-
-        # Expected value bound
-        E_Ln_bound = term1 + term2
-        print(f"E_Ln_bound: {E_Ln_bound:.6f}")
-
-        return (1 - self.eps*len(self.alphabet)) * E_Ln_bound
-
-    
-    def tail_residual_closed_form(self) -> float:
-        """
-        Compute E[(L - S)_+] for L = w_abs + m + exp(alpha*m),
-        where m ~ Geom(p_w) on {1,2,...}.
+        self.epsilon = epsilon
+        self.beta = beta
+        self.max_depth = max_depth
+        self.max_trie_depth = max_trie_depth
+        self.show_progress = show_progress
         
-        Returns np.inf if (1-p_w)*exp(alpha) >= 1.
+        # Derived quantities
+        self.len_w = len(self.reference_string)
+        self.alphabet_size = len(self.alphabet)
+        self.lag_function = lambda k: int(np.ceil(np.exp(alpha * k)))
+        self.ar_coef = lambda i: np.exp(-i ** beta)
+        self.p_w = epsilon ** self.len_w  # Probability of spontaneous w
+        
+        # Generate context tree τ as per Eq 9.5
+        self.contexts = self._generate_contexts()
+        
+        if show_progress:
+            print(f"[GalloSim] Initialized with α={alpha:.3f}, |τ|={len(self.contexts)} contexts")
+    
+    # ============================================================================
+    # CONTEXT TREE GENERATION
+    # ============================================================================
+    
+    def _generate_contexts(self) -> Set[Tuple]:
+        """
+        Generate τ = ⋃_{i≥0} ⋃_{c∈A^{l_w(i)}} c·w·A^i
+        
+        Each context has structure: filler + reference_string + prefix
+        where |filler| = l_w(i) and |prefix| = i
+        """
+        contexts = set()
+        w = self.reference_string
+        
+        for i in range(self.max_trie_depth + 1):
+            lag_len = self.lag_function(i)
+            
+            # Generate all fillers of length l_w(i)
+            for filler in product(self.alphabet, repeat=lag_len):
+                # Generate all prefixes of length i
+                for prefix in product(self.alphabet, repeat=i):
+                    # Context = filler + w + prefix
+                    context = tuple(filler) + w + tuple(prefix)
+                    contexts.add(context)
+        
+        return contexts
+    
+    def find_context(self, past: List[int]) -> Tuple:
+        """
+        Find c_τ(past) = longest suffix of past that belongs to τ
+        
+        Returns:
+            Context tuple (empty tuple if no context found)
+        """
+        max_search = min(len(past), self.max_trie_depth * 10)
+        
+        for length in range(max_search, 0, -1):
+            suffix = tuple(past[-length:])
+            if suffix in self.contexts:
+                return suffix
+        
+        return tuple()  # Empty context (renewal point)
+    
+    # ============================================================================
+    # LOOKBACK DEPTH COMPUTATION
+    # ============================================================================
+    
+    def _find_last_w_distance(self, past: List[int]) -> float:
+        """
+        Find m_i = inf{k ≥ 0: past[-(k+|w|):-(k)] = w}
+        
+        Returns:
+            Distance k to the last occurrence of w in past
+            Returns np.inf if w not found
+        """
+        w = self.reference_string
+        len_w = self.len_w
+        
+        for k in range(len(past) - len_w + 1):
+            end_idx = len(past) - k
+            start_idx = end_idx - len_w
+            
+            if start_idx >= 0 and tuple(past[start_idx:end_idx]) == w:
+                return float(k)
+        
+        return np.inf
+    
+    def compute_lookback_depth(self, U_n: float, past: List[int]) -> float:
+        """
+        Compute L'_n as in Definition 6.1.4 (Eq 6.8):
+        
+        L'_n = { 0                        if U_n < #E·ε (spontaneous)
+               { m_n + |w| + l_w(m_n)     otherwise
+        
+        Args:
+            U_n: Uniform random variable in [0,1]
+            past: Historical sequence (must have length ≥ 2S for safety)
+        
+        Returns:
+            Lookback depth (can be np.inf if w not found)
+        """
+        # Spontaneous generation (independent of past)
+        if U_n < self.alphabet_size * self.epsilon:
+            return 0.0
+        
+        # Find distance to last occurrence of w
+        m_n = self._find_last_w_distance(past)
+        
+        if m_n == np.inf:
+            return np.inf
+        
+        # Compute required context length
+        m_n_int = int(m_n)
+        return float(m_n_int + self.len_w + self.lag_function(m_n_int))
+    
+    # ============================================================================
+    # TRUNCATED EXPECTATION (Analytical)
+    # ============================================================================
+
+    def truncated_expectation_analytical(self) -> float:
+        """
+        Compute E[ψ_S(L_n)] = E[min(L_n, S)] analytically.
+        
+        This is EXACT μ_S from theory (no Monte Carlo error).
+        
+        Formula:
+            μ_S = sum_{k=0}^{S-1} k·P(L_n = k) + S·P(L_n ≥ S)
+        
+        Returns:
+            Exact truncated expectation
         """
         S = self.max_depth
-        p_w = (self.eps * len(self.alphabet))**len(self.reference_string)
-        if not (0 < p_w <= 1):
-            raise ValueError("p_w must be in (0,1].")
-        r = 1.0 - p_w
-        if r * np.exp(self.alpha) >= 1.0:
-            return np.inf
-
-        kS = compute_KS(S, self.lag_function, max_k=10_000)
-        tail_prob = r ** (kS - 1)
-
-        term_linear = tail_prob * (len(self.reference_string) - S + (kS - 1) + 1.0 / p_w)
-        term_exp = (p_w * tail_prob * np.exp(self.alpha * kS)) / (1.0 - r * np.exp(self.alpha))
-        return term_linear + term_exp
-
-
-def compute_KS(S, lag_fn, max_k=10_000):
-    """
-    Compute K_S = max{k : k + ell^w(k) <= S}.
-    """
-    for k in range(1, max_k):
-        if k + lag_fn(k) > S:
-            return k - 1
-    return max_k
-
-
+        expect_sum = 0.0
+        
+        # Sum over k = 0, 1, ..., S-1
+        for k in range(S):
+            pk = self._pmf_lookback(k)
+            expect_sum += k * pk
+        
+        # Add contribution from truncated tail: S·P(L_n ≥ S)
+        prob_exceed_S = 1.0 - self._cdf_lookback(S)
+        expect_sum += S * prob_exceed_S
+        
+        return expect_sum
     
-
-
-class SubexpARTransitionModel:
-    def __init__(self, alphabet, alpha=1.5):
+    def _pmf_lookback(self, k: int) -> float:
         """
-        alphabet     : list of possible symbols
-        alpha        : decay exponent (>1 for polynomial decay)
+        Compute P(L_n = k) using the geometric-exponential model.
+        
+        P(L_n = k) = P(M + |w| + exp(α·M) = k) where M ~ Geom(p_w)
         """
-        self.alphabet = alphabet
-        self.alpha = alpha
-
-    # ---- subexponential (polynomial) decay ----
-    def decay_fn(self, i):
-        return np.exp(- (i + 1)**self.alpha)
-
-    # ---- simple compatibility / feature function ----
-    def feature(self, past_symbol, symbol):
-        return 1.0 if past_symbol == symbol else 0.0
-
-    # ---- autoregressive score for a symbol ----
-    def transition_score(self, symbol, context):
-        score = 0.0
-        for i, past_symbol in enumerate(context):
-            score += self.decay_fn(i) * self.feature(past_symbol, symbol)
-        return score
-
-    # ---- softmax probability ----
-    def transition_prob(self, symbol, context):
-        scores = np.array([
-            self.transition_score(s, context)
+        return pmf_M_plus_exp(k, self.p_w, self.len_w, self.alpha)
+    
+    def _cdf_lookback(self, k: int) -> float:
+        """Compute P(L_n ≤ k)"""
+        return sum(self._pmf_lookback(j) for j in range(k + 1))
+    
+    # ============================================================================
+    # TAIL BOUNDS
+    # ============================================================================
+    
+    def tail_expectation_exponential_gallo(self) -> float:
+        """
+        Compute E[(L_n - S)_+] for Gallo model.
+        
+        Uses Proposition 9.2.6: tail bound accounts for P(L_n > S) via:
+            tail = r^{k_S-1} · (|w| - S + k_S - 1 + 1/p_w) 
+                   + (p_w · r^{k_S-1} · e^{α·k_S}) / (1 - r·e^α)
+        
+        where k_S = min{k: |w| + k + exp(α·k) > S}
+        
+        Returns:
+            Upper bound on tail expectation
+        """
+        S = self.max_depth
+        r = 1 - self.p_w
+        
+        # Compute cutoff k_S
+        k_S = 0
+        while self.len_w + k_S + np.exp(self.alpha * k_S) <= S:
+            k_S += 1
+        
+        if k_S <= 1:
+            return 0.0
+        
+        r_power = r ** (k_S - 1)
+        
+        term1 = r_power * (self.len_w - S + (k_S - 1) + 1.0 / self.p_w)
+        
+        denominator = 1 - r * np.exp(self.alpha)
+        if denominator <= 0:
+            return np.inf
+        
+        term2 = (self.p_w * r_power * np.exp(self.alpha * k_S)) / denominator
+        
+        return max(0.0, term1 + term2)
+    
+    # ============================================================================
+    # TRUNCATED ANALYTICAL BOUND
+    # ============================================================================
+    
+    def truncated_analytical_bound(self) -> Dict[str, float]:
+        """
+        Proposition 9.2.6: E[L_n] ≤ μ_S + tail_bound
+        
+        Returns:
+            Dictionary with bound components
+        """
+        # Compute μ_S analytically (EXACT)
+        mu_S = self.truncated_expectation_analytical()
+        
+        if mu_S == np.inf:
+            return {
+                'mu_S_analytical': np.inf,
+                'tail_bound': np.inf,
+                'total_bound': np.inf,
+                'truncation_index': self.max_depth,
+                'method': 'truncated analytical (divergent)',
+                'prob_exceed_S': 1.0
+            }
+        
+        # Tail bound
+        tail_bound = self.tail_expectation_exponential_gallo()
+        
+        # Scaling factor
+        scaling = 1 - self.alphabet_size * self.epsilon
+        
+        # Probability of exceeding S
+        prob_exceed_S = 1.0 - self._cdf_lookback(self.max_depth)
+        
+        return {
+            'mu_S_analytical': mu_S,
+            'tail_bound': tail_bound,
+            'total_bound': scaling * (mu_S + tail_bound),
+            'truncation_index': self.max_depth,
+            'method': 'truncated analytical (no MC error)',
+            'prob_exceed_S': prob_exceed_S
+        }
+    
+    # ============================================================================
+    # NON-TRUNCATED ANALYTICAL BOUND
+    # ============================================================================
+    
+    def non_truncated_expectation_analytical(self) -> float:
+        """
+        Compute exact E[L_n] for non-truncated perfect simulation.
+        
+        Uses summation E[L_n] = Σ_{k≥0} P(L_n > k)
+        
+        Returns:
+            Exact expectation
+        """
+        scaling = 1 - self.alphabet_size * self.epsilon
+        expectation = 0.0
+        tolerance = 1e-12
+        max_terms = 10000
+        
+        for k in range(max_terms):
+            prob_exceed_k = 1.0 - self._cdf_lookback(k)
+            expectation += prob_exceed_k
+            
+            if prob_exceed_k < tolerance:
+                break
+        
+        return scaling * expectation
+    
+    def non_truncated_analytical_bound(self, compute_exact: bool = False) -> Dict[str, float]:
+        """
+        Theorem 6.1.16: E[L_n] ≤ (1 - #E·ε) * (1/p_w + |w| + p_w·M·κ)
+        
+        where:
+            - p_w = ε^|w| (prob of spontaneous w)
+            - κ = Σ_{k≥0} (e^α · (1 - p_w))^k
+            - M = 1 for l_w(k) = exp(α·k)
+        
+        Returns:
+            Dictionary with theoretical bound and optionally exact value
+        """
+        r = 1 - self.p_w
+        exp_alpha = np.exp(self.alpha)
+        
+        # Check convergence of κ series
+        if r * exp_alpha >= 1:
+            theoretical_bound = np.inf
+        else:
+            kappa = 1.0 / (1 - r * exp_alpha)
+            
+            # Bound components
+            term1 = (1 - self.p_w) / self.p_w
+            term2 = self.len_w
+            term3 = self.p_w * kappa  # M = 1
+            
+            scaling = 1 - self.alphabet_size * self.epsilon
+            theoretical_bound = scaling * (term1 + term2 + term3)
+        
+        result = {
+            'theoretical_bound': theoretical_bound,
+            'decay_type': 'exponential_gallo',
+            'method': 'non-truncated analytical bound',
+            'source': 'Theorem 6.1.16'
+        }
+        
+        # Optionally compute exact value
+        if compute_exact:
+            exact_value = self.non_truncated_expectation_analytical()
+            result['exact_value'] = exact_value
+            if theoretical_bound is not None and theoretical_bound < np.inf:
+                result['gap'] = theoretical_bound - exact_value
+                result['tightness'] = exact_value / theoretical_bound if theoretical_bound > 0 else 0
+        
+        return result
+    
+    # ============================================================================
+    # UNIFIED INTERFACE (matching CFF API)
+    # ============================================================================
+    
+    def analytical_lookback_bound(
+        self,
+        truncated: bool = True,
+        compute_exact: bool = False,
+        **kwargs
+    ) -> Dict[str, float]:
+        """
+        Unified interface for analytical lookback bounds.
+        
+        Args:
+            truncated: If True, use truncated bound (user-imposed limit S)
+                      If False, use non-truncated bound (true perfect simulation)
+            compute_exact: If True, compute exact E[L_n] by summation
+            **kwargs: Additional arguments (for API compatibility)
+            
+        Returns:
+            Dictionary with bound information
+        """
+        if truncated:
+            return self.truncated_analytical_bound()
+        else:
+            return self.non_truncated_analytical_bound(compute_exact=compute_exact)
+    
+    # ============================================================================
+    # EMPIRICAL SAMPLING AND VALIDATION
+    # ============================================================================
+    
+    def empirical_lookback_samples(
+        self, 
+        num_samples: int = 10000,
+        truncated: bool = True
+    ) -> np.ndarray:
+        """
+        Generate empirical samples of lookback depth L_n.
+        
+        Args:
+            num_samples: Number of independent samples
+            truncated: If True, truncate at max_depth; if False, search until regeneration
+            
+        Returns:
+            Array of lookback depths
+        """
+        lookbacks = []
+        
+        for _ in range(num_samples):
+            # Generate random past of length sufficient for lookback
+            past_length = max(self.max_depth * 2, 1000)
+            past = [random.choice(self.alphabet) for _ in range(past_length)]
+            U_n = random.random()
+            
+            L_n = self.compute_lookback_depth(U_n, past)
+            
+            if truncated:
+                lookbacks.append(min(L_n, self.max_depth))
+            else:
+                if L_n < np.inf:
+                    lookbacks.append(L_n)
+        
+        return np.array(lookbacks)
+    
+    def validate_analytical_bound(
+        self,
+        num_samples: int = 10000,
+        truncated: bool = True,
+        **kwargs
+    ) -> Dict[str, float]:
+        """
+        Validate analytical bound against empirical samples.
+        
+        Args:
+            num_samples: Number of samples for validation
+            truncated: Whether to use truncated or non-truncated version
+            **kwargs: Arguments for analytical_lookback_bound
+            
+        Returns:
+            Comparison dictionary
+        """
+        # Get analytical bound
+        analytical = self.analytical_lookback_bound(truncated=truncated, **kwargs)
+        
+        # Generate empirical samples
+        samples = self.empirical_lookback_samples(num_samples, truncated=truncated)
+        
+        if len(samples) == 0:
+            return {
+                **analytical,
+                'empirical_mean': np.nan,
+                'empirical_std': np.nan,
+                'empirical_std_error': np.nan,
+                'discrepancy': np.nan,
+                'relative_discrepancy': np.nan,
+                'num_samples': 0,
+                'truncated': truncated,
+                'note': 'No finite samples generated'
+            }
+        
+        # Statistics
+        empirical_mean = np.mean(samples)
+        empirical_std = np.std(samples)
+        empirical_std_error = empirical_std / np.sqrt(len(samples))
+        
+        # Comparison
+        if truncated:
+            analytical_value = analytical['mu_S_analytical']
+        else:
+            analytical_value = analytical.get('exact_value', analytical['theoretical_bound'])
+        
+        discrepancy = analytical_value - empirical_mean
+        relative_discrepancy = discrepancy / analytical_value if analytical_value > 0 else 0
+        
+        return {
+            **analytical,
+            'empirical_mean': empirical_mean,
+            'empirical_std': empirical_std,
+            'empirical_std_error': empirical_std_error,
+            'discrepancy': discrepancy,
+            'relative_discrepancy': relative_discrepancy,
+            'num_samples': len(samples),
+            'truncated': truncated
+        }
+    
+    # ============================================================================
+    # USER IMPATIENCE BIAS
+    # ============================================================================
+    
+    def compute_user_impatience_bias_given_limit(self) -> float:
+        """
+        Compute user impatience bias as per Eq 9.1:
+        
+            bias = P(L_n > S) / P(L_n ≤ S)
+        
+        Returns:
+            Bias ratio (np.inf if P(L_n > S) ≥ 0.9999)
+        """
+        prob_exceed = 1.0 - self._cdf_lookback(self.max_depth)
+        
+        if prob_exceed >= 0.9999:
+            return np.inf
+        
+        return prob_exceed / (1 - prob_exceed)
+    
+    # ============================================================================
+    # TRANSITION PROBABILITIES (AR Model from Eq 9.6-9.7)
+    # ============================================================================
+    
+    def transition_probability(self, symbol: int, context: Tuple) -> float:
+        """
+        Compute p(symbol | context) via AR model (Eq 9.7):
+        
+        p(X_t = s | X_{t-1}, ..., X_{t-K}) = 
+            exp(Σ_i a_i φ(X_{t-i}, s)) / Z
+        
+        where φ(x, s) = 𝟙{x = s} and a_i = exp(-i^β)
+        """
+        K = len(context)
+        
+        if K == 0:  # Empty context → uniform
+            return 1.0 / self.alphabet_size
+        
+        # Compute score for target symbol
+        score_s = sum(
+            self.ar_coef(i + 1) 
+            for i in range(K) 
+            if context[-(i + 1)] == symbol
+        )
+        
+        # Compute partition function Z
+        Z = sum(
+            np.exp(sum(
+                self.ar_coef(i + 1) 
+                for i in range(K) 
+                if context[-(i + 1)] == s
+            ))
             for s in self.alphabet
-        ])
-        scores -= scores.max()  # numerical stability
-        probs = np.exp(scores)
-        probs /= probs.sum()
-        return max(probs[self.alphabet.index(symbol)], 0.5*np.sqrt((1 - 1/np.exp(0.5))))
+        )
+        
+        if Z == 0:
+            return 1.0 / self.alphabet_size
+        
+        return np.exp(score_s) / Z
 
-    # ---- full distribution (optional) ----
-    def transition_distribution(self, context):
-        scores = np.array([
-            self.transition_score(s, context)
-            for s in self.alphabet
-        ])
-        scores -= scores.max()
-        probs = np.exp(scores)
-        probs /= probs.sum()
-        return dict(zip(self.alphabet, probs))
+
+# ============================================================================
+# HELPER FUNCTION: PMF Computation
+# ============================================================================
+
+def pmf_M_plus_exp(k: int, p_w: float, w: int, alpha: float, 
+                   m_max: int = 10000, tol: float = 1e-12) -> float:
+    """
+    Computes P(M + w + exp(alpha·M) = k), where M ~ Geom(p_w)
+    
+    Parameters:
+        k: Target value
+        p_w: Geometric success probability (0 < p_w <= 1)
+        w: Constant shift (|w| in the model)
+        alpha: Exponent coefficient
+        m_max: Upper bound for searching m
+        tol: Numerical tolerance for equality check
+    
+    Returns:
+        Probability
+    """
+    prob = 0.0
+    
+    for m in range(1, m_max + 1):
+        value = m + w + math.exp(alpha * m)
+        
+        if abs(value - k) < tol:
+            prob += p_w * (1 - p_w) ** (m - 1)
+        
+        # Early stopping if exp(alpha·m) explodes
+        if alpha > 0 and value > k + 1:
+            break
+    
+    return prob

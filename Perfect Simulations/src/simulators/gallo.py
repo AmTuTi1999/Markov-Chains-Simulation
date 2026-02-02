@@ -1,6 +1,5 @@
 import numpy as np
 import random
-import math
 from typing import List, Tuple, Set, Dict
 from itertools import product
 
@@ -173,23 +172,16 @@ class GalloContextTreeSimulator:
         expect_sum = 0.0
         
         # Sum over k = 0, 1, ..., S-1
-        for k in range(S):
+        for k in range(S+1):
             pk = self._pmf_lookback(k)
             expect_sum += k * pk
         
         # Add contribution from truncated tail: S·P(L_n ≥ S)
-        prob_exceed_S = 1.0 - self._cdf_lookback(S)
-        expect_sum += S * prob_exceed_S
+        # prob_exceed_S = 1.0 - self._cdf_lookback(S-1)
+        # expect_sum += S * prob_exceed_S
         
         return expect_sum
     
-    def _pmf_lookback(self, k: int) -> float:
-        """
-        Compute P(L_n = k) using the geometric-exponential model.
-        
-        P(L_n = k) = P(M + |w| + exp(α·M) = k) where M ~ Geom(p_w)
-        """
-        return pmf_M_plus_exp(k, self.p_w, self.len_w, self.alpha)
     
     def _cdf_lookback(self, k: int) -> float:
         """Compute P(L_n ≤ k)"""
@@ -344,9 +336,6 @@ class GalloContextTreeSimulator:
         if compute_exact:
             exact_value = self.non_truncated_expectation_analytical()
             result['exact_value'] = exact_value
-            if theoretical_bound is not None and theoretical_bound < np.inf:
-                result['gap'] = theoretical_bound - exact_value
-                result['tightness'] = exact_value / theoretical_bound if theoretical_bound > 0 else 0
         
         return result
     
@@ -463,9 +452,11 @@ class GalloContextTreeSimulator:
         
         discrepancy = analytical_value - empirical_mean
         relative_discrepancy = discrepancy / analytical_value if analytical_value > 0 else 0
-        
+        result = analytical.copy()
+        result['tightness'] = empirical_mean / analytical_value if analytical_value > 0 else float('inf')
+
         return {
-            **analytical,
+            **result,
             'empirical_mean': empirical_mean,
             'empirical_std': empirical_std,
             'empirical_std_error': empirical_std_error,
@@ -540,32 +531,34 @@ class GalloContextTreeSimulator:
 # HELPER FUNCTION: PMF Computation
 # ============================================================================
 
-def pmf_M_plus_exp(k: int, p_w: float, w: int, alpha: float, 
-                   m_max: int = 10000, tol: float = 1e-12) -> float:
-    """
-    Computes P(M + w + exp(alpha·M) = k), where M ~ Geom(p_w)
-    
-    Parameters:
-        k: Target value
-        p_w: Geometric success probability (0 < p_w <= 1)
-        w: Constant shift (|w| in the model)
-        alpha: Exponent coefficient
-        m_max: Upper bound for searching m
-        tol: Numerical tolerance for equality check
-    
-    Returns:
-        Probability
-    """
-    prob = 0.0
-    
-    for m in range(1, m_max + 1):
-        value = m + w + math.exp(alpha * m)
+
+    def _pmf_lookback(self, k: int) -> float:
+        """
+        Compute P(L_n = k) for Gallo model.
         
-        if abs(value - k) < tol:
-            prob += p_w * (1 - p_w) ** (m - 1)
+        More robust: P(L_n = k) = P(M = m) where m satisfies:
+            m + |w| + exp(α·m) ∈ [k - 0.5, k + 0.5]
+        """
+        if k < self.len_w:
+            return 0.0
         
-        # Early stopping if exp(alpha·m) explodes
-        if alpha > 0 and value > k + 1:
-            break
-    
-    return prob
+        # Spontaneous generation
+        prob_spontaneous = self.alphabet_size * self.epsilon
+        if k == 0:
+            return prob_spontaneous
+        
+        # Find all m values that contribute to k
+        prob = 0.0
+        for m in range(1, 1000):  # Limit search
+            value = m + self.len_w + np.exp(self.alpha * m)
+            
+            # Check if this m maps to k (with some tolerance)
+            if abs(value - k) < 0.5:
+                # P(M = m) = p_w · (1 - p_w)^(m-1)
+                prob += self.p_w * ((1 - self.p_w) ** (m - 1))
+            
+            # Early stopping
+            if value > k + 10:
+                break
+        
+        return (1 - prob_spontaneous) * prob

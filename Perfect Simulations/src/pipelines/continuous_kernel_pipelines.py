@@ -59,6 +59,7 @@ def run_cff_simulation(
                 'tail_bounds': [],
                 'user_impatience': [],
                 'prob_exceed_S': [],
+                'tightness': [],
             }
         
         if run_non_truncated:
@@ -131,6 +132,7 @@ def run_cff_simulation(
                 results['truncated'][alpha]['prob_exceed_S'].append(
                     (rho, trunc_analytical['prob_exceed_S'])
                 )
+
                 
                 if validate_with_simulation:
                     results['truncated'][alpha]['empirical_bounds'].append(
@@ -138,6 +140,9 @@ def run_cff_simulation(
                     )
                     results['truncated'][alpha]['mu_S_empirical'].append(
                         (rho, empirical_mu_S)
+                    )
+                    results['truncated'][alpha]['tightness'].append(
+                    (rho, trunc_validation['tightness'])
                     )
                 
                 # Print summary
@@ -186,21 +191,23 @@ def run_cff_simulation(
                 results['non_truncated'][alpha]['exact_values'].append(
                     (rho, non_trunc_analytical['exact_value'])
                 )
-                results['non_truncated'][alpha]['tightness'].append(
-                    (rho, non_trunc_analytical['tightness'])
-                )
+
                 
                 if validate_with_simulation:
                     results['non_truncated'][alpha]['empirical_means'].append(
                         (rho, empirical_mean)
                     )
+                    results['non_truncated'][alpha]['tightness'].append(
+                    (rho, non_trunc_validation['tightness'])
+                    )
                 
                 # Print summary
                 print(f"    Theoretical bound: {non_trunc_analytical['theoretical_bound']:.2f}")
                 print(f"    Exact E[L_n]:      {non_trunc_analytical['exact_value']:.2f}")
-                print(f"    Tightness:         {non_trunc_analytical['tightness']*100:.1f}%")
+                
                 if validate_with_simulation:
                     print(f"    Empirical E[L_n]:  {empirical_mean:.2f}")
+                    print(f"    Tightness:         {non_trunc_validation['tightness']*100:.1f}%")
     
     # ========================================================
     # GENERATE PLOTS AND SAVE RESULTS
@@ -358,6 +365,18 @@ def _generate_truncated_plots(
     fig.savefig(filename, dpi=300, bbox_inches='tight')
     print(f"Saved: {filename}")
 
+    # Plot 6: Tightness Ratio
+    filename = os.path.join(results_dir, f"Truncated_Tightness_{filename_suffix}.png")
+    fig = plot_and_save_figure(
+        x=times_dct,
+        y={alpha: data['tightness'] for alpha, data in trunc_results.items()},
+        z=None,
+        xlabel=r"$\rho$ (decay parameter)",
+        ylabel=r"Tightness = Empirical / Theoretical",
+        title=f"Bound Tightness ({decay_type})",
+    )
+    fig.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"Saved: {filename}")
 
 def _save_truncated_results(
     trunc_results,
@@ -450,7 +469,7 @@ def _generate_non_truncated_plots(
         y={alpha: data['tightness'] for alpha, data in non_trunc_results.items()},
         z=None,
         xlabel=r"$\rho$ (decay parameter)",
-        ylabel=r"Tightness = Exact / Theoretical",
+        ylabel=r"Tightness = Empirical Estimation / Theoretical Bound",
         title=f"Bound Tightness ({decay_type})",
     )
     fig.savefig(filename, dpi=300, bbox_inches='tight')
@@ -462,12 +481,12 @@ def _generate_non_truncated_plots(
         fig = plot_and_save_figure(
             x=times_dct,
             y={alpha: data['empirical_means'] for alpha, data in non_trunc_results.items()},
-            z={alpha: data['exact_values'] for alpha, data in non_trunc_results.items()},
+            z={alpha: data['theoretical_bounds'] for alpha, data in non_trunc_results.items()},
             xlabel=r"$\rho$ (decay parameter)",
             ylabel=r"$\mathbb{E}[L_n]$",
-            title=f"Non-Truncated: Empirical vs Exact ({decay_type})",
-            label_1="Empirical (MC)",
-            label_2="Exact (analytical)",
+            title=f"Non-Truncated: Empirical Estimation vs Theoretical Bounds ({decay_type})",
+            label_1="Empirical Estimation(MC)",
+            label_2="Theoretical Bounds(Theorem 5.1.22)",
         )
         fig.savefig(filename, dpi=300, bbox_inches='tight')
         print(f"Saved: {filename}")

@@ -67,13 +67,13 @@ def run_gallo_simulation(
                 'tail_bounds': [],
                 'user_impatience': [],
                 'prob_exceed_S': [],
+                'tightness': [],
             }
         
         if run_non_truncated:
             results['non_truncated'][kappa] = {
                 'times': [],
                 'theoretical_bounds': [],
-                'exact_values': [],
                 'empirical_means': [],
                 'tightness': [],
             }
@@ -144,6 +144,9 @@ def run_gallo_simulation(
                     results['truncated'][kappa]['mu_S_empirical'].append(
                         (alpha, empirical_mu_S)
                     )
+                    results['truncated'][kappa]['tightness'].append(
+                    (alpha, trunc_validation['tightness'])
+                    )
                 
                 # Print summary
                 print(f"    Truncated E[L_n] ≤ {trunc_analytical['total_bound']:.2f}")
@@ -162,7 +165,7 @@ def run_gallo_simulation(
                 # Analytical bound
                 non_trunc_analytical = sim.analytical_lookback_bound(
                     truncated=False,
-                    compute_exact=True
+                    compute_exact=False
                 )
                 
                 # Validation (optional, can be slow for non-truncated)
@@ -182,22 +185,18 @@ def run_gallo_simulation(
                 results['non_truncated'][kappa]['theoretical_bounds'].append(
                     (alpha, non_trunc_analytical['theoretical_bound'])
                 )
-                results['non_truncated'][kappa]['exact_values'].append(
-                    (alpha, non_trunc_analytical['exact_value'])
-                )
-                results['non_truncated'][kappa]['tightness'].append(
-                    (alpha, non_trunc_analytical['tightness'])
-                )
+
                 
                 if validate_with_simulation:
                     results['non_truncated'][kappa]['empirical_means'].append(
                         (alpha, empirical_mean)
                     )
+                    results['non_truncated'][kappa]['tightness'].append(
+                        (alpha, non_trunc_validation['tightness'])
+                    )
                 
                 # Print summary
                 print(f"    Theoretical bound: {non_trunc_analytical['theoretical_bound']:.2f}")
-                print(f"    Exact E[L_n]:      {non_trunc_analytical['exact_value']:.2f}")
-                print(f"    Tightness:         {non_trunc_analytical['tightness']*100:.1f}%")
                 if validate_with_simulation:
                     print(f"    Empirical E[L_n]:  {empirical_mean:.2f}")
         
@@ -357,6 +356,18 @@ def _generate_truncated_plots(
     fig.savefig(filename, dpi=300, bbox_inches='tight')
     print(f"Saved: {filename}")
 
+    # Plot 6: Tightness Ratio
+    filename = os.path.join(results_dir, f"Truncated_Tightness_{filename_suffix}.png")
+    fig = plot_and_save_figure(
+        x=times_dct,
+        y={alpha: data['tightness'] for alpha, data in trunc_results.items()},
+        z=None,
+        xlabel=r"$\rho$ (decay parameter)",
+        ylabel=r"Tightness = Empirical / Theoretical",
+        title=f"Bound Tightness ({decay_type})",
+    )
+    fig.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"Saved: {filename}")
 
 def _save_truncated_results(
     trunc_results,
@@ -424,21 +435,7 @@ def _generate_non_truncated_plots(
     """Generate all plots for non-truncated perfect simulation."""
     
     times_dct = {alpha: data['times'] for alpha, data in non_trunc_results.items()}
-    
-    # Plot 1: Theoretical Bound vs Exact Value
-    filename = os.path.join(results_dir, f"NonTruncated_Bound_vs_Exact_{filename_suffix}.png")
-    fig = plot_and_save_figure(
-        x=times_dct,
-        y={alpha: data['exact_values'] for alpha, data in non_trunc_results.items()},
-        z={alpha: data['theoretical_bounds'] for alpha, data in non_trunc_results.items()},
-        xlabel=r"$\alpha$ (growth parameter)",
-        ylabel=r"Expected Lookback $\mathbb{E}[L_n]$",
-        title=f"Non-Truncated: Exact vs Theoretical Bound ({decay_type})",
-        label_1="Exact (summation)",
-        label_2="Theoretical (Theorem 6.1.16)",
-    )
-    fig.savefig(filename, dpi=300, bbox_inches='tight')
-    print(f"Saved: {filename}")
+
     
     # Plot 2: Tightness Ratio
     filename = os.path.join(results_dir, f"NonTruncated_Tightness_{filename_suffix}.png")
@@ -459,12 +456,12 @@ def _generate_non_truncated_plots(
         fig = plot_and_save_figure(
             x=times_dct,
             y={alpha: data['empirical_means'] for alpha, data in non_trunc_results.items()},
-            z={alpha: data['exact_values'] for alpha, data in non_trunc_results.items()},
-            xlabel=r"$\alpha$ (growth parameter)",
+            z={alpha: data['theoretical_bounds'] for alpha, data in non_trunc_results.items()},
+            xlabel=r"$\rho$ (decay parameter)",
             ylabel=r"$\mathbb{E}[L_n]$",
-            title=f"Non-Truncated: Empirical vs Exact ({decay_type})",
-            label_1="Empirical (MC)",
-            label_2="Exact (analytical)",
+            title=f"Non-Truncated: Empirical Estimation vs Theoretical Bounds ({decay_type})",
+            label_1="Empirical Estimation(MC)",
+            label_2="Theoretical Bounds(Theorem 6.1.6)",
         )
         fig.savefig(filename, dpi=300, bbox_inches='tight')
         print(f"Saved: {filename}")
@@ -497,21 +494,20 @@ def _save_non_truncated_results(
                    f"{'Tightness':<16}\n")
             f.write("-" * 80 + "\n")
             
-            for i, (alpha_val, _) in enumerate(data['exact_values']):
-                exact = data['exact_values'][i][1]
+            for i, (alpha_val, _) in enumerate(data['theoretical_bounds']):
                 theoretical = data['theoretical_bounds'][i][1]
                 tightness = data['tightness'][i][1]
                 
-                f.write(f"{alpha_val:<10.3f} {exact:<16.4f} {theoretical:<16.4f} "
+                f.write(f"{alpha_val:<10.3f} {theoretical:<16.4f} "
                        f"{tightness:<16.2%}\n")
             
             if validate and len(data['empirical_means']) > 0:
-                f.write("\nValidation (Empirical vs Exact):\n")
-                f.write(f"{'alpha':<10} {'Empirical':<16} {'Exact':<16} {'Discrepancy':<16}\n")
+                f.write("\nValidation (Empirical vs Theoretical):\n")
+                f.write(f"{'alpha':<10} {'Empirical':<16} {'Theoretical':<16} {'Discrepancy':<16}\n")
                 f.write("-" * 80 + "\n")
                 for i, (alpha_val, _) in enumerate(data['empirical_means']):
                     emp = data['empirical_means'][i][1]
-                    exact = data['exact_values'][i][1]
+                    exact = data['theoretical_bounds'][i][1]
                     disc = exact - emp
                     f.write(f"{alpha_val:<10.3f} {emp:<16.4f} {exact:<16.4f} {disc:<16.4f}\n")
     

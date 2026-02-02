@@ -21,12 +21,12 @@ if __name__ == "__main__":
     results = run_gallo_simulation(
         window=(0, 10),
         args=args,
-        max_trie_depth=2,       # Context tree depth (exponential complexity!)
-        max_depth=50,              # Truncation index
+        max_trie_depth=5,       # Context tree depth (exponential complexity!)
+        max_depth=5000,              # Truncation index
         num_validation_samples=10000,  # MC samples
         validate_with_simulation=True,
         run_truncated=True,
-        run_non_truncated=False,
+        run_non_truncated=True,
     )
     
     # Optional: Run comparative study

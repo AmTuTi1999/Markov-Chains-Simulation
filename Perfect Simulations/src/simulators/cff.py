@@ -259,9 +259,7 @@ class BinaryAutoregressiveSimulator:
         if compute_exact:
             exact_value = self.non_truncated_expectation_analytical()
             result['exact_value'] = exact_value
-            if theoretical_bound is not None:
-                result['gap'] = theoretical_bound - exact_value
-                result['tightness'] = exact_value / theoretical_bound
+
         
         return result
 
@@ -506,9 +504,12 @@ class BinaryAutoregressiveSimulator:
         
         discrepancy = analytical_value - empirical_mean
         relative_discrepancy = discrepancy / analytical_value if analytical_value > 0 else 0
-        
+
+        result = analytical.copy()
+        result['tightness'] = empirical_mean / analytical_value if analytical_value > 0 else float('inf')
+
         return {
-            **analytical,
+            **result,
             'empirical_mean': empirical_mean,
             'empirical_std': empirical_std,
             'empirical_std_error': empirical_std_error,

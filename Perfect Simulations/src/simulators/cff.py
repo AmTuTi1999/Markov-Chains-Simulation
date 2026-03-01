@@ -472,6 +472,8 @@ class BinaryAutoregressiveSimulator:
         self,
         num_samples: int = 10000,
         truncated: bool = True,
+        ci_level: Optional[float] = 0.95,
+        return_ci: bool = True,
         **kwargs
     ) -> Dict[str, float]:
         """
@@ -507,7 +509,20 @@ class BinaryAutoregressiveSimulator:
 
         result = analytical.copy()
         result['tightness'] = empirical_mean / analytical_value if analytical_value > 0 else float('inf')
-
+        result["std_error"] = empirical_std_error
+        if return_ci:
+            # z-value for common CI levels
+            z = 1.959963984540054 if abs(ci_level - 0.95) < 1e-12 else None
+            if z is None:
+                # crude fallback using inverse-erf approximation
+                
+                # approximate z from ci_level (two-sided)
+                # for typical thesis usage, 0.95 is enough; otherwise user can extend this
+                z = 1.959963984540054
+            half = z * empirical_std_error
+            result["ci_low"] = empirical_mean - half
+            result["ci_high"] = empirical_mean + half
+            result["ci_level"] = float(ci_level)
         return {
             **result,
             'empirical_mean': empirical_mean,

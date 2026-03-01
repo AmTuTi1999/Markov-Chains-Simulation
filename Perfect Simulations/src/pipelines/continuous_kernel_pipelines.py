@@ -9,7 +9,7 @@ def run_cff_simulation(
     window: tuple,
     theta_args: dict,
     max_regen_search_depth: int = 5000,
-    num_validation_samples: int = 10000,
+    num_validation_samples: int = 100000000,
     validate_with_simulation: bool = True,
     run_truncated: bool = True,
     run_non_truncated: bool = False,
@@ -69,6 +69,9 @@ def run_cff_simulation(
                 'exact_values': [],
                 'empirical_means': [],
                 'tightness': [],
+                'ci_low': [],
+                'ci_high': [],
+                'empirical_std_error': [],
             }
         
         for rho in rhos:
@@ -200,6 +203,15 @@ def run_cff_simulation(
                     results['non_truncated'][alpha]['tightness'].append(
                     (rho, non_trunc_validation['tightness'])
                     )
+                    results['non_truncated'][alpha]['ci_low'].append(
+                        (rho, non_trunc_validation.get('ci_low', float('nan')))
+                    )
+                    results['non_truncated'][alpha]['ci_high'].append(
+                        (rho, non_trunc_validation.get('ci_high', float('nan')))
+                    )
+                    results['non_truncated'][alpha]['empirical_std_error'].append(
+                        (rho, non_trunc_validation.get('empirical_std_error', float('nan')))
+                    )
                 
                 # Print summary
                 print(f"    Theoretical bound: {non_trunc_analytical['theoretical_bound']:.2f}")
@@ -208,6 +220,8 @@ def run_cff_simulation(
                 if validate_with_simulation:
                     print(f"    Empirical E[L_n]:  {empirical_mean:.2f}")
                     print(f"    Tightness:         {non_trunc_validation['tightness']*100:.1f}%")
+                    print(f"    95% CI:            [{non_trunc_validation['ci_low']:.2f}, "
+                          f"{non_trunc_validation['ci_high']:.2f}]")
     
     # ========================================================
     # GENERATE PLOTS AND SAVE RESULTS
@@ -520,24 +534,29 @@ def _save_non_truncated_results(
             f.write(f"{'rho':<10} {'Exact E[L_n]':<16} {'Theoretical':<16} "
                    f"{'Tightness':<16}\n")
             f.write("-" * 80 + "\n")
-            
+            print(data.keys())
             for i, (rho, _) in enumerate(data['exact_values']):
                 exact = data['exact_values'][i][1]
                 theoretical = data['theoretical_bounds'][i][1]
                 tightness = data['tightness'][i][1]
+
                 
                 f.write(f"{rho:<10.3f} {exact:<16.4f} {theoretical:<16.4f} "
                        f"{tightness:<16.2%}\n")
             
             if validate:
+                
                 f.write("\nValidation (Empirical vs Exact):\n")
-                f.write(f"{'rho':<10} {'Empirical':<16} {'Exact':<16} {'Discrepancy':<16}\n")
+                f.write(f"{'rho':<10} {'Empirical':<16} {'Exact':<16} {'Discrepancy':<16} {'CI_Low':<16} {'CI_High':<16} {'Std Error':<16}\n")
                 f.write("-" * 80 + "\n")
                 for i, (rho, _) in enumerate(data['empirical_means']):
                     emp = data['empirical_means'][i][1]
                     exact = data['exact_values'][i][1]
+                    ci_low = data['ci_low'][i][1] if 'ci_low' in data else float('nan')
+                    ci_high = data['ci_high'][i][1] if 'ci_high' in data else float('nan')
+                    std_error = data['empirical_std_error'][i][1] if 'empirical_std_error' in data else float('nan')
                     disc = exact - emp
-                    f.write(f"{rho:<10.3f} {emp:<16.4f} {exact:<16.4f} {disc:<16.4f}\n")
+                    f.write(f"{rho:<10.3f} {emp:<16.4f} {exact:<16.4f} {disc:<16.4f} {ci_low:<16.4f} {ci_high:<16.4f} {std_error:<16.4f}\n")
     
     print(f"Saved: {results_file}")
 

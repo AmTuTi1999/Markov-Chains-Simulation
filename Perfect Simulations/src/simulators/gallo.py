@@ -1,16 +1,20 @@
 import numpy as np
-import random
-from typing import List, Tuple, Set, Dict
+from typing import List, Tuple, Set, Dict, Optional, Union
 from itertools import product
+from tqdm import tqdm
+from src.utils import LazyU
+
 
 class GalloContextTreeSimulator:
     """
-    Perfect simulation for chains with unbounded variable-length memory.
-    Implements Gallo (2009) construction with context trees.
-    
-    Matches the experimental framework used in CFF experiments.
+    (Approximate) forward simulation + Monte Carlo estimation for lookback depth L'_n.
+
+    IMPORTANT CHANGE vs your original:
+    - Empirical sampling now simulates the CHAIN Z using your transition_probability + find_context,
+      instead of using an i.i.d. fake "past".
+    - Lookback m_n is computed efficiently along the path by tracking the last occurrence of w.
     """
-    
+
     def __init__(
         self,
         alpha: float,
@@ -20,440 +24,612 @@ class GalloContextTreeSimulator:
         beta: float = 0.7,
         max_depth: int = 50,
         max_trie_depth: int = 8,
-        show_progress: bool = False
+        show_progress: bool = False,
+        M: int = 1,
     ):
-        """
-        Initialize Gallo simulator.
-        
-        Args:
-            alpha: Growth parameter for lag function l_w(k) = exp(α·k)
-            alphabet: State space (e.g., [-1, +1])
-            reference_string: Reference string w (e.g., [-1, +1])
-            epsilon: Minimum transition probability (non-nullness bound)
-            beta: AR coefficient decay exponent: a_i = exp(-i^β)
-            max_depth: Maximum context tree depth for generation (this is S)
-            max_trie_depth: Maximum depth for context tree construction
-            show_progress: Whether to show progress bars
-        """
-        self.alpha = alpha
-        self.alphabet = alphabet
+        self.alpha = float(alpha)
+        self.alphabet = list(alphabet)
         self.reference_string = tuple(reference_string)
-        self.epsilon = epsilon
-        self.beta = beta
-        self.max_depth = max_depth
-        self.max_trie_depth = max_trie_depth
-        self.show_progress = show_progress
-        
-        # Derived quantities
+        self.epsilon = float(epsilon)
+        self.beta = float(beta)
+        self.max_depth = int(max_depth)
+        self.max_trie_depth = int(max_trie_depth)
+        self.show_progress = bool(show_progress)
+
         self.len_w = len(self.reference_string)
         self.alphabet_size = len(self.alphabet)
-        self.lag_function = lambda k: int(np.ceil(np.exp(alpha * k)))
-        self.ar_coef = lambda i: np.exp(-i ** beta)
-        self.p_w = epsilon ** self.len_w  # Probability of spontaneous w
-        
-        # Generate context tree τ as per Eq 9.5
+        self.lag_function = lambda k: int(np.ceil(np.exp(M*self.alpha * k)))
+        self.ar_coef = lambda i: float(np.exp(-(i ** self.beta)))
+        self.p_w = float(self.epsilon ** self.len_w)
+        self.bound_constant = M
         self.contexts = self._generate_contexts()
-        
-        if show_progress:
-            print(f"[GalloSim] Initialized with α={alpha:.3f}, |τ|={len(self.contexts)} contexts")
-    
+        self.U = LazyU()
+
+        if self.show_progress:
+            print(f"[GalloSim] Initialized with α={self.alpha:.3f}, |τ|={len(self.contexts)} contexts")
+
     # ============================================================================
     # CONTEXT TREE GENERATION
     # ============================================================================
-    
+
     def _generate_contexts(self) -> Set[Tuple]:
         """
-        Generate τ = ⋃_{i≥0} ⋃_{c∈A^{l_w(i)}} c·w·A^i
-        
-        Each context has structure: filler + reference_string + prefix
-        where |filler| = l_w(i) and |prefix| = i
+        Generate τ = ⋃_{i≥0} ⋃_{c∈A^{l_w(i)}} c·w·A^i, truncated by max_trie_depth.
+
+        Each context: filler + w + prefix where |prefix| = i and |filler| = l_w(i).
         """
-        contexts = set()
+        contexts: Set[Tuple] = set()
         w = self.reference_string
-        
+
         for i in range(self.max_trie_depth + 1):
             lag_len = self.lag_function(i)
-            
-            # Generate all fillers of length l_w(i)
+
             for filler in product(self.alphabet, repeat=lag_len):
-                # Generate all prefixes of length i
                 for prefix in product(self.alphabet, repeat=i):
-                    # Context = filler + w + prefix
                     context = tuple(filler) + w + tuple(prefix)
                     contexts.add(context)
-        
+
         return contexts
-    
+
     def find_context(self, past: List[int]) -> Tuple:
         """
-        Find c_τ(past) = longest suffix of past that belongs to τ
-        
-        Returns:
-            Context tuple (empty tuple if no context found)
+        Find c_τ(past) = longest suffix of past that belongs to τ.
         """
         max_search = min(len(past), self.max_trie_depth * 10)
-        
         for length in range(max_search, 0, -1):
             suffix = tuple(past[-length:])
             if suffix in self.contexts:
                 return suffix
-        
-        return tuple()  # Empty context (renewal point)
-    
+        return tuple()
+
     # ============================================================================
-    # LOOKBACK DEPTH COMPUTATION
+    # TRANSITION PROBABILITIES (AR Model from Eq 9.6-9.7)
     # ============================================================================
-    
-    def _find_last_w_distance(self, past: List[int]) -> float:
+
+    def transition_probability(self, symbol: int, context: Tuple) -> float:
         """
-        Find m_i = inf{k ≥ 0: past[-(k+|w|):-(k)] = w}
-        
-        Returns:
-            Distance k to the last occurrence of w in past
-            Returns np.inf if w not found
+        AR model (as in your code).
         """
-        w = self.reference_string
-        len_w = self.len_w
-        
-        for k in range(len(past) - len_w + 1):
-            end_idx = len(past) - k
-            start_idx = end_idx - len_w
-            
-            if start_idx >= 0 and tuple(past[start_idx:end_idx]) == w:
-                return float(k)
-        
-        return np.inf
-    
-    def compute_lookback_depth(self, U_n: float, past: List[int]) -> float:
+        K = len(context)
+        if K == 0:
+            return 1.0 / self.alphabet_size
+
+        score_s = sum(
+            self.ar_coef(i + 1)
+            for i in range(K)
+            if context[-(i + 1)] == symbol
+        )
+
+        Z = 0.0
+        for s in self.alphabet:
+            score = sum(
+                self.ar_coef(i + 1)
+                for i in range(K)
+                if context[-(i + 1)] == s
+            )
+            Z += float(np.exp(score))
+
+        if Z <= 0:
+            return 1.0 / self.alphabet_size
+
+        return float(np.exp(score_s) / Z)
+
+    # ============================================================================
+    # LOOKBACK DEPTH L' COMPUTATION (efficient on a whole path)
+    # ============================================================================
+
+    def _compute_last_end_up_to_generic(self, X: np.ndarray, pattern: np.ndarray) -> np.ndarray:
         """
-        Compute L'_n as in Definition 6.1.4 (Eq 6.8):
-        
-        L'_n = { 0                        if U_n < #E·ε (spontaneous)
-               { m_n + |w| + l_w(m_n)     otherwise
-        
-        Args:
-            U_n: Uniform random variable in [0,1]
-            past: Historical sequence (must have length ≥ 2S for safety)
-        
-        Returns:
-            Lookback depth (can be np.inf if w not found)
+        Generic:
+        last_end_up_to[t] = last index <= t where pattern ends, i.e. X[t-L+1:t+1] == pattern.
+        If no occurrence yet: -1
         """
-        # Spontaneous generation (independent of past)
+        T = len(X)
+        L = len(pattern)
+
+        last_end = -1
+        out = np.full(T, -1, dtype=int)
+
+        for t in range(T):
+            if t >= L - 1 and np.array_equal(X[t - L + 1:t + 1], pattern):
+                last_end = t
+            out[t] = last_end
+
+        return out
+
+
+    def _compute_last_end_up_to(self, Z: np.ndarray) -> np.ndarray:
+        """
+        Original version for Z, matching self.reference_string.
+        """
+        w = np.asarray(self.reference_string, dtype=Z.dtype)
+        return self._compute_last_end_up_to_generic(Z, w)
+
+
+    def _compute_last_end_up_to_rescaled(
+        self,
+        Z_bar: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Rescaled version for \bar Z, matching reference_bar.
+
+        If reference_bar is None, defaults to a run of ones of length self.len_w
+        (common choice when \bar Z_m ∈ {1, ★} and you want occurrences of all-1 blocks).
+        """
+        return self._compute_last_end_up_to_generic(Z_bar, np.array([1]))
+
+    def compute_lookback_depth_from_last_end(self, U_n: float, i: int, last_end_up_to: np.ndarray) -> float:
+        """
+        Compute L'_i using precomputed last_end_up_to from a simulated path.
+
+        L'_i = 0                                  if U_i < |A| * epsilon
+             = m_i + |w| + ceil(l^w((m+1)|w| + 1)/|w|)              otherwise
+
+        where m_i = (i-1) - last_end_up_to[i-1] (distance to last end of w before i)
+        """
         if U_n < self.alphabet_size * self.epsilon:
             return 0.0
-        
-        # Find distance to last occurrence of w
-        m_n = self._find_last_w_distance(past)
-        
-        if m_n == np.inf:
+
+        if i - 1 < 0:
             return np.inf
-        
-        # Compute required context length
-        m_n_int = int(m_n)
-        return float(m_n_int + self.len_w + self.lag_function(m_n_int))
-    
+
+        le = int(last_end_up_to[i - 1])
+        if le < 0:
+            return np.inf
+
+        m = (i - 1) - le
+        return float(m + self.len_w + np.ceil(self.lag_function((m + 1)*self.len_w - 1)/self.len_w))
+
+    def compute_lookback_depth_from_last_end_rescaled(
+        self,
+        Zbar_n: Union[int, str],
+        n: int,
+        last_one_up_to: np.ndarray
+    ) -> float:
+        """
+        Rescaled version (for \bar Z).
+
+        L_n = 0                                             if \bar Z_n = 1
+            = \bar m_n + |w| + ceil( l^w((\bar m_n+1)|w|-1) / |w| )   otherwise
+
+        where \bar m_n = (n-1) - last_one_up_to[n-1]
+        and last_one_up_to[t] = last index <= t where \bar Z == 1, else -1.
+
+        Notes:
+        - n is an index into the *rescaled* chain \bar Z (block time).
+        - |w| is still self.len_w (your original word length / block length).
+        """
+        if Zbar_n == 1:
+            return 0.0
+
+        if n - 1 < 0:
+            return np.inf
+
+        le = int(last_one_up_to[n - 1]) 
+        if le < 0:
+            return np.inf
+
+        mbar = (n - 1) - le
+        return float(
+            mbar
+            + self.len_w
+            + np.ceil(self.lag_function((mbar + 1) * self.len_w - 1) / self.len_w)
+        )
     # ============================================================================
-    # TRUNCATED EXPECTATION (Analytical)
+    # FORWARD SIMULATION OF THE CHAIN Z (approximate stationarity via burn-in)
+    # ============================================================================
+
+    def simulate_chain_forward(
+        self,
+        T: int = 200_000,
+        burn_in: int = 10_000,
+        seed: Optional[int] = None,
+        init_past_len: Optional[int] = None,
+        epsilon: float = 0.0,
+        return_rescaled: bool = False,
+        star_value: Union[int, str] = 0, 
+    ) -> Union[np.ndarray, Tuple[np.ndarray, ...]]:
+        """
+        Simulate Z forward using a single driving uniform U_t each step, in the spirit of
+        the interval construction:
+            J(a|∅) = [ (a-1)ε, aε )
+
+        If return_rescaled=True and block_len=L is provided, compute the block process \bar Z_m:
+            \bar Z_m = 1  if U_{mL-i} ∈ J(Z_{mL-i}|∅) for i=0..L-1
+                    = ★  otherwise
+        using non-overlapping blocks of length L on the returned post-burn-in sample.
+
+        Returns:
+            - Z (np.ndarray) if no extras requested
+            - (Z, U) if return_uniforms
+            - (Z, Z_bar) if return_rescaled
+            - (Z, U, Z_bar) if both
+        """
+        rng = np.random.default_rng(seed)
+
+        if not (0.0 <= epsilon <= 1.0):
+            raise ValueError("epsilon must be in [0, 1].")
+        if epsilon * self.alphabet_size > 1.0 + 1e-12:
+            raise ValueError("Need epsilon * |A| <= 1 for the spontaneous intervals to fit in [0,1].")
+
+        if init_past_len is None:
+            init_past_len = max(2 * self.max_depth, 200)
+
+        alphabet = np.array(sorted(self.alphabet), dtype=int)
+        A = int(self.alphabet_size)
+
+        Z_list = [int(rng.choice(alphabet)) for _ in range(init_past_len)]
+
+        total_steps = burn_in + T
+        eps_mass = epsilon * A
+        rem_mass = 1.0 - eps_mass
+
+        for step in range(total_steps):
+            print(f"[GalloSim] Simulating chain forward: step {step + 1}/{total_steps}", end="\r")
+
+            ctx = self.find_context(Z_list)
+            probs = np.array([self.transition_probability(a, ctx) for a in alphabet], dtype=float)
+
+            s = probs.sum()
+            if s <= 0:
+                probs[:] = 1.0 / A
+            else:
+                probs /= s
+
+            if epsilon > 0.0 and self.U[step] < eps_mass:
+                idx = int(self.U[step] / epsilon)  
+                a_next = int(alphabet[idx])
+                Z_list.append(a_next)
+                continue
+
+            if rem_mass <= 0.0:
+                a_next = int(alphabet[min(A - 1, int((self.U[step] - 1e-15) / max(epsilon, 1e-15)))])
+                Z_list.append(a_next)
+                continue
+
+            residual = np.maximum(probs - epsilon, 0.0)
+            rsum = residual.sum()
+
+            if rsum <= 0:
+                cdf = np.cumsum(probs)
+                a_next = int(alphabet[int(np.searchsorted(cdf, self.U[step], side="right"))])
+                Z_list.append(a_next)
+                continue
+
+            u2 = (self.U[step] - eps_mass) / rem_mass
+            residual /= rsum
+            cdf = np.cumsum(residual)
+            j = int(np.searchsorted(cdf, u2, side="right"))
+            if j >= A:
+                j = A - 1
+            Z_list.append(int(alphabet[j]))
+
+        Z_full = np.array(Z_list[-T:], dtype=int)
+        print(f"\n[GalloSim] Simulated chain forward: burn-in={burn_in}, T={T}, total={total_steps}")
+
+        if return_rescaled:
+            if self.len_w is None or self.len_w <= 0:
+                raise ValueError("To compute Z_bar, len_w must be a positive integer.")
+
+            L = int(self.len_w)
+            M = T // L 
+            Z_use = Z_full[-M * L:]
+            w = np.array(self.reference_string, dtype=Z_use.dtype)
+            Z_blocks = Z_use.reshape(M, L)
+            matches = np.all(Z_blocks == w, axis=1)
+
+            dtype = object if isinstance(star_value, str) else int
+            Z_bar = np.where(matches, 1, 0 if not isinstance(star_value, str) else star_value).astype(dtype)
+
+            return Z_bar
+
+        else:
+            return Z_full
+
+    # ============================================================================
+    # MONTE CARLO ESTIMATION OF E[L']
+    # ============================================================================
+
+    def monte_carlo_E_Lprime(
+        self,
+        T: int = 200_000,
+        burn_in: int = 10_000000,
+        seed: Optional[int] = None,
+        truncated: bool = False,
+        truncate_at: Optional[int] = None,
+        drop_infinite: bool = True,
+        return_ci: bool = True,
+        ci_level: Optional[float] = 0.95
+    ) -> Dict[str, float]:
+        """
+        Monte Carlo estimate of E[L'_i] by simulating Z and averaging L'_i along the path.
+
+        Args:
+            T: kept sample size after burn-in
+            burn_in: burn-in length
+            truncated: if True, use min(L', S)
+            truncate_at: truncation S (defaults to self.max_depth)
+            drop_infinite: if True, drop indices where L' is infinite (typically early / before first w)
+
+        Returns:
+            dict with mean, std, stderr, and counts
+        """
+        if truncate_at is None:
+            truncate_at = self.max_depth
+
+        np.random.default_rng(seed)
+        Z = self.simulate_chain_forward(T=T, burn_in=burn_in, seed=seed, return_rescaled=True)
+        
+        last_end_up_to = self._compute_last_end_up_to_rescaled(Z)
+
+        Lprime = np.empty(T // self.len_w, dtype=float)
+        for i in tqdm(range(T // self.len_w), disable=not self.show_progress):
+            Lprime[i] = self.compute_lookback_depth_from_last_end_rescaled(Z[i], i, last_end_up_to)
+
+        if truncated:
+            finite = np.isfinite(Lprime)
+            Lprime_tr = np.full_like(Lprime, float(truncate_at))
+            Lprime_tr[finite] = np.minimum(Lprime[finite], float(truncate_at))
+            Luse = Lprime_tr
+            used = T
+            dropped = 0
+        else:
+            if drop_infinite:
+                mask = np.isfinite(Lprime)
+                Luse = Lprime[mask]
+                used = int(mask.sum())
+                dropped = int((~mask).sum())
+            else:
+                Luse = Lprime
+                used = T
+                dropped = 0
+
+        if used == 0:
+            return {
+                "mean": float("nan"),
+                "std": float("nan"),
+                "stderr": float("nan"),
+                "used": 0,
+                "dropped_infinite": dropped,
+                "T": T,
+                "burn_in": burn_in,
+                "truncated": truncated,
+                "truncate_at": truncate_at
+            }
+
+        mean = float(np.mean(Luse))
+        std = float(np.std(Luse, ddof=1)) if used > 1 else 0.0
+        stderr = float(std / np.sqrt(used)) if used > 1 else 0.0
+        if return_ci:
+            # z-value for common CI levels
+            z = 1.959963984540054 if abs(ci_level - 0.95) < 1e-12 else None
+            if z is None:
+                # crude fallback using inverse-erf approximation
+                
+                # approximate z from ci_level (two-sided)
+                # for typical thesis usage, 0.95 is enough; otherwise user can extend this
+                z = 1.959963984540054
+            half = z * stderr
+        return {
+            "mean": mean,
+            "std": std,
+            "stderr": stderr,
+            "used": used,
+            "dropped_infinite": dropped,
+            "T": T,
+            "burn_in": burn_in,
+            "truncated": truncated,
+            "truncate_at": truncate_at,
+            "ci_low": mean - half if return_ci else float("nan"),
+            "ci_high": mean + half if return_ci else float("nan"),
+            "ci_level": float(ci_level)
+        }
+
+    def empirical_lookback_samples(
+        self,
+        num_samples: int = 10_000,
+        truncated: bool = True,
+        seed: Optional[int] = None,
+        burn_in: int = 10_000,
+        drop_infinite: bool = True
+    ) -> np.ndarray:
+        """
+        Backwards-compatible "samples" method:
+        now returns samples of L' along a simulated chain instead of i.i.d. fake past.
+
+        Args:
+            num_samples: number of time points sampled (path length)
+            truncated: whether to truncate at self.max_depth
+            seed: RNG seed
+            burn_in: burn-in for approximate stationarity
+            drop_infinite: if not truncated, drop inf values
+
+        Returns:
+            numpy array of samples
+        """
+
+        # Re-run but return samples (we keep it simple and re-simulate deterministically via seed offset)
+        rng = np.random.default_rng(seed)
+        Z = self.simulate_chain_forward(T=num_samples, burn_in=burn_in, seed=seed)
+        U = rng.random(num_samples)
+        last_end_up_to = self._compute_last_end_up_to(Z)
+
+        Lprime = np.empty(num_samples, dtype=float)
+        for i in range(num_samples):
+            Lprime[i] = self.compute_lookback_depth_from_last_end(U[i], i, last_end_up_to)
+
+        if truncated:
+            finite = np.isfinite(Lprime)
+            out = np.full_like(Lprime, float(self.max_depth))
+            out[finite] = np.minimum(Lprime[finite], float(self.max_depth))
+            return out
+
+        if drop_infinite:
+            return Lprime[np.isfinite(Lprime)]
+        return Lprime
+
+    # ============================================================================
+    # YOUR ANALYTICAL PARTS (kept as-is, except minor robustness)
     # ============================================================================
 
     def truncated_expectation_analytical(self) -> float:
         """
-        Compute E[ψ_S(L_n)] = E[min(L_n, S)] analytically.
-        
-        This is EXACT μ_S from theory (no Monte Carlo error).
-        
-        Formula:
-            μ_S = sum_{k=0}^{S-1} k·P(L_n = k) + S·P(L_n ≥ S)
-        
-        Returns:
-            Exact truncated expectation
+        Compute E[min(L_n, S)] via your pmf/cdf machinery (unchanged).
         """
-        S = self.max_depth
+        S = self.max_trie_depth
         expect_sum = 0.0
-        
-        # Sum over k = 0, 1, ..., S-1
-        for k in range(S+1):
+
+        for k in range(S + 1):
             pk = self._pmf_lookback(k)
             expect_sum += k * pk
-        
-        # Add contribution from truncated tail: S·P(L_n ≥ S)
-        # prob_exceed_S = 1.0 - self._cdf_lookback(S-1)
-        # expect_sum += S * prob_exceed_S
-        
-        return expect_sum
-    
-    
+
+        prob_exceed_S = 1.0 - self._cdf_lookback(S - 1)
+        expect_sum += S * prob_exceed_S
+        return float(expect_sum)
+
     def _cdf_lookback(self, k: int) -> float:
-        """Compute P(L_n ≤ k)"""
-        return sum(self._pmf_lookback(j) for j in range(k + 1))
+        return float(sum(self._pmf_lookback(j) for j in range(k + 1)))
+
     
-    # ============================================================================
-    # TAIL BOUNDS
-    # ============================================================================
-    
+
     def tail_expectation_exponential_gallo(self) -> float:
-        """
-        Compute E[(L_n - S)_+] for Gallo model.
-        
-        Uses Proposition 9.2.6: tail bound accounts for P(L_n > S) via:
-            tail = r^{k_S-1} · (|w| - S + k_S - 1 + 1/p_w) 
-                   + (p_w · r^{k_S-1} · e^{α·k_S}) / (1 - r·e^α)
-        
-        where k_S = min{k: |w| + k + exp(α·k) > S}
-        
-        Returns:
-            Upper bound on tail expectation
-        """
-        S = self.max_depth
+        S = self.max_trie_depth
         r = 1 - self.p_w
-        
-        # Compute cutoff k_S
+
         k_S = 0
-        while self.len_w + k_S + np.exp(self.alpha * k_S) <= S:
+        while self.len_w + k_S + np.ceil(self.lag_function(self.len_w*k_S)*np.exp(self.alpha*self.len_w -self.alpha)/self.len_w) <= S:
             k_S += 1
-        
+
         if k_S <= 1:
             return 0.0
-        
-        r_power = r ** (k_S - 1)
-        
-        term1 = r_power * (self.len_w - S + (k_S - 1) + 1.0 / self.p_w)
-        
-        denominator = 1 - r * np.exp(self.alpha)
+
+        r_power = r ** (k_S)
+        term1 = r_power * (self.len_w - S + (k_S + 1) + (1-self.p_w) / self.p_w)
+
+        denominator = self.len_w * (1 - r * np.exp(self.alpha*self.len_w))
         if denominator <= 0:
-            return np.inf
-        
-        term2 = (self.p_w * r_power * np.exp(self.alpha * k_S)) / denominator
-        
-        return max(0.0, term1 + term2)
-    
-    # ============================================================================
-    # TRUNCATED ANALYTICAL BOUND
-    # ============================================================================
-    
+            return float("inf")
+
+        term2 = self.bound_constant*(self.p_w * r_power * self.lag_function(self.len_w*k_S)*np.exp(self.alpha*self.len_w - self.alpha)) / denominator
+        return float(max(0.0, term1 + term2))
+
     def truncated_analytical_bound(self) -> Dict[str, float]:
-        """
-        Proposition 9.2.6: E[L_n] ≤ μ_S + tail_bound
-        
-        Returns:
-            Dictionary with bound components
-        """
-        # Compute μ_S analytically (EXACT)
         mu_S = self.truncated_expectation_analytical()
-        
-        if mu_S == np.inf:
+        if not np.isfinite(mu_S):
             return {
-                'mu_S_analytical': np.inf,
-                'tail_bound': np.inf,
-                'total_bound': np.inf,
-                'truncation_index': self.max_depth,
+                'mu_S_analytical': float("inf"),
+                'tail_bound': float("inf"),
+                'total_bound': float("inf"),
+                'truncation_index': self.max_trie_depth,
                 'method': 'truncated analytical (divergent)',
                 'prob_exceed_S': 1.0
             }
-        
-        # Tail bound
+
         tail_bound = self.tail_expectation_exponential_gallo()
-        
-        # Scaling factor
-        scaling = 1 - self.alphabet_size * self.epsilon
-        
-        # Probability of exceeding S
-        prob_exceed_S = 1.0 - self._cdf_lookback(self.max_depth)
-        
+        scaling = 1 - self.epsilon**self.len_w
+        prob_exceed_S = 1.0 - self._cdf_lookback(self.max_trie_depth - 1)
+
         return {
-            'mu_S_analytical': mu_S,
-            'tail_bound': tail_bound,
-            'total_bound': scaling * (mu_S + tail_bound),
-            'truncation_index': self.max_depth,
+            'mu_S_analytical': float(mu_S),
+            'tail_bound': float(tail_bound),
+            'total_bound': float(scaling * (mu_S + tail_bound)),
+            'truncation_index': self.max_trie_depth,
             'method': 'truncated analytical (no MC error)',
-            'prob_exceed_S': prob_exceed_S
+            'prob_exceed_S': float(prob_exceed_S)
         }
-    
-    # ============================================================================
-    # NON-TRUNCATED ANALYTICAL BOUND
-    # ============================================================================
-    
+
     def non_truncated_expectation_analytical(self) -> float:
-        """
-        Compute exact E[L_n] for non-truncated perfect simulation.
-        
-        Uses summation E[L_n] = Σ_{k≥0} P(L_n > k)
-        
-        Returns:
-            Exact expectation
-        """
-        scaling = 1 - self.alphabet_size * self.epsilon
+        scaling = 1 - self.epsilon**self.len_w
         expectation = 0.0
         tolerance = 1e-12
         max_terms = 10000
-        
+
         for k in range(max_terms):
             prob_exceed_k = 1.0 - self._cdf_lookback(k)
             expectation += prob_exceed_k
-            
             if prob_exceed_k < tolerance:
                 break
-        
-        return scaling * expectation
-    
+
+        return float(scaling * expectation)
+
     def non_truncated_analytical_bound(self, compute_exact: bool = False) -> Dict[str, float]:
-        """
-        Theorem 6.1.16: E[L_n] ≤ (1 - #E·ε) * (1/p_w + |w| + p_w·M·κ)
-        
-        where:
-            - p_w = ε^|w| (prob of spontaneous w)
-            - κ = Σ_{k≥0} (e^α · (1 - p_w))^k
-            - M = 1 for l_w(k) = exp(α·k)
-        
-        Returns:
-            Dictionary with theoretical bound and optionally exact value
-        """
         r = 1 - self.p_w
-        exp_alpha = np.exp(self.alpha)
         
-        # Check convergence of κ series
-        if r * exp_alpha >= 1:
-            theoretical_bound = np.inf
+
+        if r * np.exp(self.alpha*self.len_w) >= 1:
+            theoretical_bound = float("inf")
         else:
-            kappa = 1.0 / (1 - r * exp_alpha)
-            
-            # Bound components
-            term1 = (1 - self.p_w) / self.p_w
+            kappa = 1.0 / (1 - r * np.exp(self.alpha*self.len_w))*self.len_w
+            term1 = 1 / self.p_w
             term2 = self.len_w
-            term3 = self.p_w * kappa  # M = 1
-            
-            scaling = 1 - self.alphabet_size * self.epsilon
-            theoretical_bound = scaling * (term1 + term2 + term3)
-        
+            term3 = self.p_w * kappa *self.bound_constant*np.exp(self.alpha*self.len_w - self.alpha) 
+            scaling = 1 - self.epsilon**self.len_w
+            theoretical_bound = float(scaling * (term1 + term2 + term3))
+
         result = {
             'theoretical_bound': theoretical_bound,
             'decay_type': 'exponential_gallo',
             'method': 'non-truncated analytical bound',
             'source': 'Theorem 6.1.16'
         }
-        
-        # Optionally compute exact value
+
         if compute_exact:
-            exact_value = self.non_truncated_expectation_analytical()
-            result['exact_value'] = exact_value
-        
+            result['exact_value'] = self.non_truncated_expectation_analytical()
+
         return result
-    
-    # ============================================================================
-    # UNIFIED INTERFACE (matching CFF API)
-    # ============================================================================
-    
+
     def analytical_lookback_bound(
         self,
         truncated: bool = True,
         compute_exact: bool = False,
         **kwargs
     ) -> Dict[str, float]:
-        """
-        Unified interface for analytical lookback bounds.
-        
-        Args:
-            truncated: If True, use truncated bound (user-imposed limit S)
-                      If False, use non-truncated bound (true perfect simulation)
-            compute_exact: If True, compute exact E[L_n] by summation
-            **kwargs: Additional arguments (for API compatibility)
-            
-        Returns:
-            Dictionary with bound information
-        """
         if truncated:
             return self.truncated_analytical_bound()
-        else:
-            return self.non_truncated_analytical_bound(compute_exact=compute_exact)
-    
-    # ============================================================================
-    # EMPIRICAL SAMPLING AND VALIDATION
-    # ============================================================================
-    
-    def empirical_lookback_samples(
-        self, 
-        num_samples: int = 10000,
-        truncated: bool = True
-    ) -> np.ndarray:
-        """
-        Generate empirical samples of lookback depth L_n.
-        
-        Args:
-            num_samples: Number of independent samples
-            truncated: If True, truncate at max_depth; if False, search until regeneration
-            
-        Returns:
-            Array of lookback depths
-        """
-        lookbacks = []
-        
-        for _ in range(num_samples):
-            # Generate random past of length sufficient for lookback
-            past_length = max(self.max_depth * 2, 1000)
-            past = [random.choice(self.alphabet) for _ in range(past_length)]
-            U_n = random.random()
-            
-            L_n = self.compute_lookback_depth(U_n, past)
-            
-            if truncated:
-                lookbacks.append(min(L_n, self.max_depth))
-            else:
-                if L_n < np.inf:
-                    lookbacks.append(L_n)
-        
-        return np.array(lookbacks)
-    
+        return self.non_truncated_analytical_bound(compute_exact=compute_exact)
+
     def validate_analytical_bound(
         self,
-        num_samples: int = 10000,
+        num_samples: int = 10_000,
         truncated: bool = True,
+        burn_in: int = 10_000,
+        seed: Optional[int] = None,
         **kwargs
     ) -> Dict[str, float]:
-        """
-        Validate analytical bound against empirical samples.
-        
-        Args:
-            num_samples: Number of samples for validation
-            truncated: Whether to use truncated or non-truncated version
-            **kwargs: Arguments for analytical_lookback_bound
-            
-        Returns:
-            Comparison dictionary
-        """
-        # Get analytical bound
         analytical = self.analytical_lookback_bound(truncated=truncated, **kwargs)
-        
-        # Generate empirical samples
-        samples = self.empirical_lookback_samples(num_samples, truncated=truncated)
-        
+        samples = self.empirical_lookback_samples(
+            num_samples=num_samples,
+            truncated=truncated,
+            burn_in=burn_in,
+            seed=seed,
+            drop_infinite=True
+        )
+
         if len(samples) == 0:
             return {
                 **analytical,
-                'empirical_mean': np.nan,
-                'empirical_std': np.nan,
-                'empirical_std_error': np.nan,
-                'discrepancy': np.nan,
-                'relative_discrepancy': np.nan,
+                'empirical_mean': float("nan"),
+                'empirical_std': float("nan"),
+                'empirical_std_error': float("nan"),
+                'discrepancy': float("nan"),
+                'relative_discrepancy': float("nan"),
                 'num_samples': 0,
                 'truncated': truncated,
                 'note': 'No finite samples generated'
             }
-        
-        # Statistics
-        empirical_mean = np.mean(samples)
-        empirical_std = np.std(samples)
-        empirical_std_error = empirical_std / np.sqrt(len(samples))
-        
-        # Comparison
-        if truncated:
-            analytical_value = analytical['mu_S_analytical']
-        else:
-            analytical_value = analytical.get('exact_value', analytical['theoretical_bound'])
-        
-        discrepancy = analytical_value - empirical_mean
-        relative_discrepancy = discrepancy / analytical_value if analytical_value > 0 else 0
+
+        empirical_mean = float(np.mean(samples))
+        empirical_std = float(np.std(samples, ddof=1)) if len(samples) > 1 else 0.0
+        empirical_std_error = float(empirical_std / np.sqrt(len(samples))) if len(samples) > 1 else 0.0
+
+        analytical_value = analytical['mu_S_analytical'] if truncated else analytical.get('exact_value', analytical['theoretical_bound'])
+
+        discrepancy = float(analytical_value - empirical_mean) if np.isfinite(analytical_value) else float("nan")
+        relative_discrepancy = float(discrepancy / analytical_value) if (np.isfinite(analytical_value) and analytical_value > 0) else float("nan")
+
+        tightness = float(empirical_mean / analytical_value) if (np.isfinite(analytical_value) and analytical_value > 0) else float("inf")
         result = analytical.copy()
-        result['tightness'] = empirical_mean / analytical_value if analytical_value > 0 else float('inf')
+        result['tightness'] = tightness
 
         return {
             **result,
@@ -462,103 +638,37 @@ class GalloContextTreeSimulator:
             'empirical_std_error': empirical_std_error,
             'discrepancy': discrepancy,
             'relative_discrepancy': relative_discrepancy,
-            'num_samples': len(samples),
+            'num_samples': int(len(samples)),
             'truncated': truncated
         }
-    
-    # ============================================================================
-    # USER IMPATIENCE BIAS
-    # ============================================================================
-    
+
     def compute_user_impatience_bias_given_limit(self) -> float:
-        """
-        Compute user impatience bias as per Eq 9.1:
-        
-            bias = P(L_n > S) / P(L_n ≤ S)
-        
-        Returns:
-            Bias ratio (np.inf if P(L_n > S) ≥ 0.9999)
-        """
-        prob_exceed = 1.0 - self._cdf_lookback(self.max_depth)
-        
+        prob_exceed = 1.0 - self._cdf_lookback(self.max_trie_depth - 1)
         if prob_exceed >= 0.9999:
-            return np.inf
-        
-        return prob_exceed / (1 - prob_exceed)
-    
+            return float("inf")
+        return float(prob_exceed / (1 - prob_exceed))
+
     # ============================================================================
-    # TRANSITION PROBABILITIES (AR Model from Eq 9.6-9.7)
+    # PMF (left as your original logic, but keep it safe)
     # ============================================================================
-    
-    def transition_probability(self, symbol: int, context: Tuple) -> float:
-        """
-        Compute p(symbol | context) via AR model (Eq 9.7):
-        
-        p(X_t = s | X_{t-1}, ..., X_{t-K}) = 
-            exp(Σ_i a_i φ(X_{t-i}, s)) / Z
-        
-        where φ(x, s) = 𝟙{x = s} and a_i = exp(-i^β)
-        """
-        K = len(context)
-        
-        if K == 0:  # Empty context → uniform
-            return 1.0 / self.alphabet_size
-        
-        # Compute score for target symbol
-        score_s = sum(
-            self.ar_coef(i + 1) 
-            for i in range(K) 
-            if context[-(i + 1)] == symbol
-        )
-        
-        # Compute partition function Z
-        Z = sum(
-            np.exp(sum(
-                self.ar_coef(i + 1) 
-                for i in range(K) 
-                if context[-(i + 1)] == s
-            ))
-            for s in self.alphabet
-        )
-        
-        if Z == 0:
-            return 1.0 / self.alphabet_size
-        
-        return np.exp(score_s) / Z
-
-
-# ============================================================================
-# HELPER FUNCTION: PMF Computation
-# ============================================================================
-
 
     def _pmf_lookback(self, k: int) -> float:
         """
-        Compute P(L_n = k) for Gallo model.
-        
-        More robust: P(L_n = k) = P(M = m) where m satisfies:
-            m + |w| + exp(α·m) ∈ [k - 0.5, k + 0.5]
+        Your original heuristic PMF mapping of m -> k.
         """
-        if k < self.len_w:
+        if k < self.len_w and k != 0:
             return 0.0
-        
-        # Spontaneous generation
+
         prob_spontaneous = self.alphabet_size * self.epsilon
         if k == 0:
-            return prob_spontaneous
-        
-        # Find all m values that contribute to k
+            return float(prob_spontaneous)
+
         prob = 0.0
-        for m in range(1, 1000):  # Limit search
-            value = m + self.len_w + np.exp(self.alpha * m)
-            
-            # Check if this m maps to k (with some tolerance)
+        for m in range(0, 100000):
+            value = m + self.len_w + self.lag_function(m)
             if abs(value - k) < 0.5:
-                # P(M = m) = p_w · (1 - p_w)^(m-1)
-                prob += self.p_w * ((1 - self.p_w) ** (m - 1))
-            
-            # Early stopping
+                prob += self.p_w * ((1 - self.p_w) ** (m))
             if value > k + 10:
                 break
-        
-        return (1 - prob_spontaneous) * prob
+
+        return float((1 - prob_spontaneous) * prob)

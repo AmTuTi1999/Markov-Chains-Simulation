@@ -11,7 +11,7 @@ if __name__ == "__main__":
     "theta_generator": InfinitePolynomialTheta,
     "theta0": 0.00000001,
     "alphas":[0.9], 
-    "rhos":[11],
+    "rhos":[3,4,5,6,7,8,9,10,11],
     'decay_type': 'polynomial',
     'C': 2.5,
     }

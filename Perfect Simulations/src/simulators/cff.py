@@ -1,9 +1,10 @@
 import math
+import warnings
 import functools
 import numpy as np
 from tqdm import tqdm
 from src.utils import LazyU
-from typing import Literal, Optional, Dict, Tuple
+from typing import Literal, Optional, Dict
 
 # ============================================================
 # Binary Autoregressive Perfect Simulation (CFF 2002)
@@ -29,15 +30,11 @@ class BinaryAutoregressiveSimulator:
     ):
         self.theta0 = float(theta0)
         self.theta = theta_seq
-        self.G = alphabet if alphabet is not None else [-1, +1]
+        self.alphabet = alphabet if alphabet is not None else [-1, +1]
         self.max_depth = int(max_regen_search_depth)
         self.show_progress = show_progress
 
-        assert set(self.G) == {-1, +1}, "Alphabet must be {-1, +1}"
-
-    # --------------------------------------------------------
-    # Logistic link and Lipschitz constant
-    # --------------------------------------------------------
+        assert set(self.alphabet) == {-1, +1}, "Alphabet must be {-1, +1}"
 
     @staticmethod
     def q_logistic(x):
@@ -59,11 +56,7 @@ class BinaryAutoregressiveSimulator:
     @property
     def alphabet_size(self):
         """Size of the alphabet |A|."""
-        return len(self.G)
-
-    # --------------------------------------------------------
-    # Conditional probability
-    # --------------------------------------------------------
+        return len(self.alphabet)
 
     def conditional_P(self, g, history):
         """
@@ -75,10 +68,6 @@ class BinaryAutoregressiveSimulator:
 
         p = self.q_logistic(x)
         return p if g == +1 else (1.0 - p)
-
-    # --------------------------------------------------------
-    # a_k(g | w)
-    # --------------------------------------------------------
 
     def a_k_g_given_w(self, k, g, w_minus_1_to_minus_k):
         """
@@ -101,9 +90,6 @@ class BinaryAutoregressiveSimulator:
 
         return min(vals)
 
-    # --------------------------------------------------------
-    # a_k (memory threshold / minorant)
-    # --------------------------------------------------------
 
     @functools.lru_cache(None)
     def a_k(self, k):
@@ -115,10 +101,233 @@ class BinaryAutoregressiveSimulator:
         """
         r_k = self.theta.tail_sum(k)
         return max(0.0, 1.0 - 2.0 * self.C_plus * r_k)
+    
+    def compute_L(self, u):
+        """Smallest k such that u < a_k."""
+        for k in range(self.max_depth + 1):
+            if u < self.a_k(k):
+                return k
+        return self.max_depth
 
-    # ========================================================
-    # NON-TRUNCATED PERFECT SIMULATION BOUNDS
-    # ========================================================
+    def tau_of_n(self, U, window, truncation_depth=None, tau_tol=1e7):
+        """
+        Compute regeneration time τ[s,t] for the CFF algorithm.
+
+        Parameters
+        ----------
+        U                : LazyU
+        window           : (s, t)
+        truncation_depth : int or None  -- hard stop, raises RegenerationNotFound
+        tau_tol          : float        -- warn if search depth exceeds this (default 1e7)
+        """
+        s, t = window
+        search_limit = (s - truncation_depth) if truncation_depth is not None else None
+
+        m = s
+        while search_limit is None or m >= search_limit:
+
+            if abs(m - s) > tau_tol:
+                warnings.warn(
+                    f"Backward search depth {abs(m - s):.2e} exceeded "
+                    f"tau_tol={tau_tol:.2e} at m={m} for window={window}. "
+                    f"Consider truncated_perfect_sample(max_depth=M) — "
+                    f"bias bounded by P(T>M)/(1-P(T>M)) per thesis eq. (9.1).",
+                    UserWarning,
+                    stacklevel=2
+                )
+                tau_tol = float('inf')
+
+            if all(U[k] < self.a_k(k - m) for k in range(m, t + 1)):
+                return m
+            m -= 1
+
+        raise RegenerationNotFound(
+            f"No regeneration found within truncation depth {truncation_depth}. "
+            f"Output will carry user-impatience bias; see thesis eq. (9.1)."
+        )
+
+
+    def build_partition(self, L_j, past):
+        """
+        Partition [0,1[ into intervals B_{l,k}(a) as per Definition 5.1.2.
+
+        The partition is structured as:
+            [0, α₀[         → B_0(a) blocks, spontaneous generation
+            [α₀, α₁[        → B_1(a) blocks, depth-1 refinement
+            ...
+            [α_{L-1}, α_L[  → B_L(a) blocks, deepest refinement
+            [α_L, 1[        → residual (no regeneration at this site)
+
+        Parameters
+        ----------
+        L_j : int
+            Lookback depth at site j.
+        past : list
+            Past symbols x_{j-1}, x_{j-2}, ... (index 0 = most recent).
+
+        Returns
+        -------
+        partition : list of (left, right, depth, symbol) tuples
+            Each entry is one B_{l}(a) interval.
+        residual_left : float
+            Left endpoint of the residual interval [α_L, 1[.
+            If U[j] falls here, no regeneration occurs at site j.
+        """
+        partition = []
+
+        alpha_prev = 0.0 
+
+        for depth_level in range(L_j + 1):
+            w = past[:depth_level]  
+            alpha_l = sum(self.a_k_g_given_w(depth_level, a, w) for a in self.alphabet)
+            alpha_l = min(alpha_l, 1.0)  
+
+            band_width = alpha_l - alpha_prev  
+            if band_width <= 0:
+                alpha_prev = alpha_l
+                continue
+
+            left = alpha_prev
+            for a in self.alphabet:
+                akg = self.a_k_g_given_w(depth_level, a, w)
+                width = min(akg, alpha_l - left)  
+                if width > 0:
+                    partition.append((left, left + width, depth_level, a))
+                    left += width
+
+            alpha_prev = alpha_l
+
+        residual_left = alpha_prev
+        return partition, residual_left
+
+
+    def sample_from_partition(self, U_j, partition, residual_left):
+        """
+        Locate U_j in the B_{l}(a) partition of §5.1.2.
+
+        Called only from sample_interval starting at a valid regeneration
+        time, so U_j < residual_left is guaranteed — the residual branch
+        is unreachable by construction.
+
+        Returns (symbol, depth).
+        """
+        for (left, right, depth, symbol) in partition:
+            if left <= U_j < right:
+                return symbol, depth
+
+        last_left, last_right, last_depth, last_symbol = partition[-1]
+        warnings.warn(
+            f"U_j={U_j:.17f} fell in floating point gap just below "
+            f"residual_left={residual_left:.17f}. "
+            f"Assigning to last interval [{last_left:.17f}, {last_right:.17f}[. "
+            f"Use math.fsum in build_partition to prevent this.",
+            UserWarning,
+            stacklevel=2
+        )
+        return last_symbol, last_depth
+    
+    def sample_interval(self, U, tau, window):
+        """
+        Forward construction X_tau, ..., X_t using the B_{l}(a) partition of §5.1.2.
+
+        Since we start at a valid regeneration time tau, U[j] is guaranteed to
+        fall within the partition for every j in [tau, t] — the residual case
+        cannot occur by construction of compute_L and tau_of_n.
+
+        Parameters
+        ----------
+        U     : LazyU  -- i.i.d. Uniform[0,1) variables indexed by integer time
+        tau   : int    -- regeneration time; X[tau] sampled at depth 0
+        window: (s, t) -- observation window; returns X[s..t]
+        """
+        X = {}
+        tau = int(tau)
+        _, t = window
+
+        iterator = range(tau, t + 1)
+        if self.show_progress:
+            iterator = tqdm(iterator, desc="Forward sampling")
+
+        for j in iterator:
+            past = tuple(X[j - k] for k in range(1, j - tau + 1))
+            partition, residual_left = self.build_partition(self.compute_L(U[j]), past)
+            symbol, depth = self.sample_from_partition(U[j], partition, residual_left)
+            X[j] = symbol
+
+        return X
+
+
+    def perfect_sample(self, window=(0, 0)):
+        """
+        Perfectly sample X[s], ..., X[t] from the stationary distribution μ
+        via the CFF backward search + forward construction.
+
+        The backward search finds τ[s,t] = min{τ[n] : n ∈ [s,t]} by searching
+        backward from s until a valid regeneration time is found for the full
+        window, or the truncation depth is exhausted.
+
+        Parameters
+        ----------
+        window : (s, t)
+
+        Returns
+        -------
+        samples  : list -- X[s], ..., X[t]
+        tau      : int  -- the regeneration time found
+        """
+        U = LazyU()
+        s, t = window
+
+        try:
+            tau = self.tau_of_n(U, window, truncation_depth=None)
+        except RegenerationNotFound:
+            raise RegenerationNotFound(
+                f"Backward search exceeded max_depth={self.max_depth} "
+                f"for window={window}. "
+                f"Output would carry user-impatience bias per eq. (9.1). "
+                f"Increase max_depth or use truncated_perfect_sample()."
+            )
+
+        X = self.sample_interval(U, tau, window)
+        return [X[i] for i in range(s, t + 1)], tau
+
+
+    def truncated_perfect_sample(self, window=(0, 0)):
+        """
+        Truncated variant: if no regeneration is found within max_depth,
+        return the sample anyway with a bias warning rather than raising.
+
+        The bias is bounded by ℙ(T > M) / (1 - ℙ(T > M)) per eq. (9.1).
+
+        Returns
+        -------
+        samples   : list
+        tau       : int or None  -- None means truncation was hit
+        truncated : bool         -- True if result carries user-impatience bias
+        """
+        U = LazyU()
+        s, t = window
+
+        try:
+            tau = self.tau_of_n(U, window, truncation_depth=self.max_depth)
+            truncated = False
+        except RegenerationNotFound:
+            # Fall back to the truncation boundary as a pseudo-regeneration time.
+            # Caller is responsible for handling the induced bias.
+            tau = s - self.max_depth
+            truncated = True
+            warnings.warn(
+                f"Truncation hit at depth {self.max_depth} for window={window}. "
+                f"Sample is drawn from conditional distribution, not μ. "
+                f"Bias bound: P(T>{self.max_depth}) / (1 - P(T>{self.max_depth})) "
+                f"per thesis eq. (9.1).",
+                UserWarning,
+                stacklevel=2
+            )
+
+        X = self.sample_interval(U, tau, window)
+        return [X[i] for i in range(s, t + 1)], tau, truncated
+
 
     def non_truncated_expectation_analytical(self) -> float:
         """
@@ -263,10 +472,6 @@ class BinaryAutoregressiveSimulator:
         
         return result
 
-    # ========================================================
-    # TRUNCATED PERFECT SIMULATION BOUNDS (from before)
-    # ========================================================
-
     def truncated_expectation_analytical(self) -> float:
         """
         Compute E[ψ_S(L_n)] = E[min(L_n, S)] analytically using minorants.
@@ -399,9 +604,6 @@ class BinaryAutoregressiveSimulator:
             'prob_exceed_S': 1.0 - self.a_k(self.max_depth)
         }
 
-    # ========================================================
-    # UNIFIED INTERFACE
-    # ========================================================
 
     def analytical_lookback_bound(
         self,
@@ -424,9 +626,6 @@ class BinaryAutoregressiveSimulator:
         else:
             return self.non_truncated_analytical_bound(**kwargs)
 
-    # --------------------------------------------------------
-    # Empirical Validation (for both truncated and non-truncated)
-    # --------------------------------------------------------
 
     def empirical_lookback_samples(
         self, 
@@ -452,7 +651,6 @@ class BinaryAutoregressiveSimulator:
         for _ in iterator:
             U = LazyU()
             
-            # Find smallest k such that U[0] < a_k
             k = 0
             max_search = self.max_depth if truncated else 100000
             
@@ -487,13 +685,10 @@ class BinaryAutoregressiveSimulator:
         Returns:
             Comparison dictionary
         """
-        # Get analytical bound
         analytical = self.analytical_lookback_bound(truncated=truncated, **kwargs)
         
-        # Generate empirical samples
         samples = self.empirical_lookback_samples(num_samples, truncated=truncated)
         
-        # Statistics
         empirical_mean = np.mean(samples)
         empirical_std = np.std(samples)
         empirical_std_error = empirical_std / np.sqrt(num_samples)
@@ -511,13 +706,8 @@ class BinaryAutoregressiveSimulator:
         result['tightness'] = empirical_mean / analytical_value if analytical_value > 0 else float('inf')
         result["std_error"] = empirical_std_error
         if return_ci:
-            # z-value for common CI levels
             z = 1.959963984540054 if abs(ci_level - 0.95) < 1e-12 else None
             if z is None:
-                # crude fallback using inverse-erf approximation
-                
-                # approximate z from ci_level (two-sided)
-                # for typical thesis usage, 0.95 is enough; otherwise user can extend this
                 z = 1.959963984540054
             half = z * empirical_std_error
             result["ci_low"] = empirical_mean - half
@@ -534,9 +724,6 @@ class BinaryAutoregressiveSimulator:
             'truncated': truncated
         }
 
-    # --------------------------------------------------------
-    # Legacy methods and perfect sampling (unchanged)
-    # --------------------------------------------------------
 
     def compute_user_impatience_bias_given_limit(self) -> float:
         """User impatience bias for truncated simulation."""
@@ -544,92 +731,6 @@ class BinaryAutoregressiveSimulator:
         prob_within = self.a_k(self.max_depth)
         return prob_exceed / prob_within if prob_within > 0 else float('inf')
 
-    def compute_K(self, u):
-        """Smallest k such that u < a_k."""
-        for k in range(self.max_depth + 1):
-            if u < self.a_k(k):
-                return k
-        return self.max_depth
-
-    def tau_of_n(self, U, window):
-        """Compute regeneration time τ[n]."""
-        s, t = window
-        lower_bound = s - self.max_depth
-
-        for m in range(s, lower_bound - 1, -1):
-            valid = True
-            for k in range(m, t + 1):
-                if U[k] >= self.a_k(k - m):
-                    valid = False
-                    break
-            if valid:
-                return m
-
-        return lower_bound
-
-    def sample_interval(self, U, tau, window, debug=False):
-        """Construct X_tau, ..., X_n."""
-        X = {}
-        n = window[1]
-        tau = int(tau)
-
-        iterator = range(tau, n + 1)
-        if self.show_progress:
-            iterator = tqdm(iterator, desc="Forward sampling")
-
-        for j in iterator:
-            # Build past
-            past = []
-            k = 1
-            while True:
-                idx = j - k
-                if idx < tau or idx not in X:
-                    break
-                past.append(X[idx])
-                k += 1
-            past = tuple(past)
-
-            # Memory depth
-            Kj = self.compute_K(U[j])
-
-            # Probability partition
-            intervals = []
-            left = 0.0
-
-            for k in range(Kj + 1):
-                w = past[:k]
-                for g in self.G:
-                    akg = self.a_k_g_given_w(k, g, w)
-                    akg = min(akg, 1.0 - left)
-                    intervals.append((left, left + akg, g))
-                    left += akg
-
-            # Sample
-            uj = U[j]
-            for L, R, g in intervals:
-                if L <= uj < R:
-                    X[j] = g
-                    break
-            else:
-                X[j] = self.G[-1]
-
-        return X
-
-    def perfect_sample(self, window: Tuple[int, int] = (0, 0)):
-        """Perfectly sample X_window[0] ... X_window[1]."""
-        U = LazyU()
-        s, t = window
-
-        iterator = range(t, s - self.max_depth - 1, -1)
-        if self.show_progress:
-            iterator = tqdm(iterator, desc="Backward search")
-
-        tau_n = None
-        for _ in iterator:
-            tau_n = self.tau_of_n(U, window)
-            if tau_n > s - self.max_depth:
-                break
-
-        X = self.sample_interval(U, tau_n, window)
-        samples = [X[i] for i in range(s, t + 1)]
-        return samples, tau_n
+class RegenerationNotFound(Exception):
+    """Raised when backward search hits the truncation horizon without regenerating."""
+    pass

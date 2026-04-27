@@ -43,6 +43,19 @@ def run_cff_simulation(
     # RUN EXPERIMENTS
     # ========================================================
     
+    theta_seq = theta_generator(alpha=0.9, rho=3)
+    
+    # Initialize simulator
+    start_time = time.time()
+    sim = BinaryAutoregressiveSimulator(
+        theta0=theta0,
+        theta_seq=theta_seq,
+        max_regen_search_depth=max_regen_search_depth,
+        show_progress=False
+    )
+    perfect_samples = sim.perfect_sample()
+
+    print(perfect_samples)
     for alpha in alphas:
         print(f"\n{'='*70}")
         print(f"ALPHA = {alpha:.2f}")

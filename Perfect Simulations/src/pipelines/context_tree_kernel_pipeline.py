@@ -1,9 +1,11 @@
 import time
 import os
 import numpy as np
-import matplotlib.pyplot as plt
 
 from src.simulators.gallo import GalloContextTreeSimulator
+from src.utils.visualize import (
+    plot_and_save_figure,
+)
 
 
 
@@ -198,92 +200,6 @@ def run_gallo_simulation(
 
     return results
 
-def plot_and_save_figure(
-    x,
-    y,
-    z=None,
-    xlabel="",
-    ylabel="",
-    title="",
-    label_1=None,
-    label_2=None,
-):
-    """
-    Generic plotting utility for thesis experiments.
-
-    Parameters
-    ----------
-    x : list | array | dict
-        X-axis values (alphas). If dict, keys are used and sorted.
-    y : list | array
-        First curve values.
-    z : list | array | None
-        Optional second curve values.
-    """
-
-    # --------------------------------------------------
-    # Normalize x input
-    # --------------------------------------------------
-    if isinstance(x, dict):
-        x_vals = np.array(sorted(x.keys()), dtype=float)
-    else:
-        x_vals = np.array(x, dtype=float)
-
-    y_vals = np.array(y, dtype=float)
-
-    if len(x_vals) != len(y_vals):
-        raise ValueError(
-            f"x and y must have same length: len(x)={len(x_vals)}, len(y)={len(y_vals)}"
-        )
-
-    if z is not None:
-        z_vals = np.array(z, dtype=float)
-        if len(z_vals) != len(x_vals):
-            raise ValueError(
-                f"x and z must have same length: len(x)={len(x_vals)}, len(z)={len(z_vals)}"
-            )
-    else:
-        z_vals = None
-
-    # --------------------------------------------------
-    # Plot
-    # --------------------------------------------------
-    fig, ax = plt.subplots(figsize=(7, 5))
-
-    ax.plot(
-        x_vals,
-        y_vals,
-        marker="o",
-        linewidth=2,
-        markersize=5,
-        label=label_1 if label_1 else None,
-    )
-
-    if z_vals is not None:
-        ax.plot(
-            x_vals,
-            z_vals,
-            marker="s",
-            linewidth=2,
-            linestyle="--",
-            markersize=5,
-            label=label_2 if label_2 else None,
-        )
-
-    # --------------------------------------------------
-    # Styling
-    # --------------------------------------------------
-    ax.set_xlabel(xlabel, fontsize=12)
-    ax.set_ylabel(ylabel, fontsize=12)
-    ax.set_title(title, fontsize=13)
-
-    ax.grid(True, alpha=0.3)
-
-    if label_1 or label_2:
-        ax.legend()
-
-    fig.tight_layout()
-    return fig
 
 
 def _generate_truncated_plots(trunc_results, results_dir, filename_suffix, S, decay_type, validate):

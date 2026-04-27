@@ -2,7 +2,9 @@ import time
 import os
 import numpy as np
 from src.simulators.garcia import GarciaContextTreeSimulator
-from src.utils.visualize import plot_and_save_figure
+from src.utils.visualize import (
+    plot_and_save_figure,
+)
 
 def run_garcia_simulation(
     window: tuple,

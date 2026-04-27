@@ -2,7 +2,9 @@ import time
 import os
 
 from src.simulators.cff import BinaryAutoregressiveSimulator
-from src.utils.visualize import plot_and_save_figure
+from src.utils.visualize import (
+    plot_and_save_figure,
+)
 
 
 def run_cff_simulation(
